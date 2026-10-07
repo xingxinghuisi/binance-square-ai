@@ -40,6 +40,12 @@ SQLite v7 -> v8 adds telemetry without replacing queue/ratings/budgets. Historic
 the first 24 hours explicitly show partial coverage. CLI checks retain active writer claims; startup recovery remains.
 Back up before upgrading. RUN_LIVE_TESTS stays false in default CI and no real keys are injected.
 
+Phase 1.6 validation: **90 tests passed, 7 live cases skipped**, Ruff and compileall passed locally.
+The [verified Phase 1.6 CI run](https://github.com/xingxinghuisi/binance-square-ai/actions/runs/37665111835)
+at commit `472ff5f` also passed Compose build/up/health and staging readiness/quality/session smoke.
+Local Docker is unavailable; these actual container checks ran in GitHub Actions. No VPS was deployed,
+and this phase did not run real AI/source probes or publish to Square. See [validation](docs/VALIDATION.md).
+
 ## Phase 1.5 diagnostics and review
 
 Phase 1.5 adds real-request diagnostics and draft quality records without redesigning Phase 1.

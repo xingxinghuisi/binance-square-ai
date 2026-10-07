@@ -35,6 +35,12 @@ session-report 汇总滚动 24 小时 UTC 的采集结果、模型尝试（含 r
 升级后前 24 小时明确显示记录不完整。CLI 检查保留正在 writing 的 claim，后台启动仍保留崩溃恢复。
 升级前备份。CI 默认 RUN_LIVE_TESTS=false，不注入真实 Key。
 
+Phase 1.6 实际验证：本地 **90 passed、7 live tests skipped**，Ruff、compileall 通过。
+提交 `472ff5f` 的 [已核验 CI](https://github.com/xingxinghuisi/binance-square-ai/actions/runs/37665111835)
+也已通过 Compose build/up/health，以及容器内 readiness/质量/会话报告 smoke。
+本机没有 Docker，真实容器检查由 GitHub Actions 完成；本轮未部署 VPS，未执行真实 AI/公开源探测，
+未向 Square 发布。详情见 [验证记录](docs/VALIDATION.md)。
+
 ## Phase 1.5 诊断与人工质量记录
 
 在 Phase 1 上增量增加真实请求诊断和草稿质量记录，不重新设计原有架构。

@@ -110,6 +110,7 @@
 | 真实本地进程 | 模拟 Docker COPY 布局，鉴权后台、/health、三项 CLI 报告、Preview、评分通过；输入 AUTO_PUBLISH=true，运行态仍 false |
 | 文档中的备份代码 | 使用实际 STAGING.md Python snippet，在源 DB 存在已提交 WAL 数据时生成快照；quick_check 和 WAL 记录核对通过 |
 | 本机 Docker | 实际尝试 build/up/ps，均因找不到 docker 命令而无法运行；本机没有 Docker CLI/Engine |
+| Phase 1.6 远程 CI | 提交 `472ff5f1589db7341b6beb954830c92131cdb081` 的 [run 37665111835](https://github.com/xingxinghuisi/binance-square-ai/actions/runs/37665111835) 已完成且 success；pytest/Ruff/compileall/独立 import/Compose build-up-health 及容器内报告和 readiness smoke 均通过 |
 
 最初异步测试因 Windows 沙盒阻止本机 asyncio socketpair 而卡住；获准网络权限后重新运行，
 默认测试仍拦截外部 HTTP。模块回归发现精简旧 v4 DB 缺 kv 表，已补充幂等建表并修复回归。
@@ -117,8 +118,8 @@
 
 本轮 CI 保持 RUN_LIVE_TESTS=false、AUTO_PUBLISH=false、真实 Gemini/Groq/Square Key 留空。
 容器步骤在原 build/up/health 上增加 readiness fail-closed 与质量/会话报告 smoke；管理员 token 为明确的 CI mock。
-本次远程容器结果必须按本轮提交的 [GitHub Actions](https://github.com/xingxinghuisi/binance-square-ai/actions)
-单独核验，历史 Phase 1.5 容器成功不替代本轮验证。
+已通过公开 GitHub Actions run/jobs 记录核对本次 SHA 和各步骤 success；容器诊断与清理也成功。
+本轮实际容器验证独立于历史 Phase 1.5，容器测试关闭采集、没有真实模型或 Square 凭据。
 
 未连接 VPS、未部署生产或 staging 服务器；本轮未发起真实 AI/公开源探测，也未开启 RUN_LIVE_TESTS。
 没有使用 Square Key、创建真实帖子或上传 Binance 媒体。普通测试中的既有发布协议验证仅使用 localhost mock。
