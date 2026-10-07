@@ -1,4 +1,4 @@
-name: Phase 1 CI
+name: Phase 1.5 CI
 on:
   push:
   pull_request:
@@ -6,6 +6,12 @@ on:
 jobs:
   test-and-container:
     runs-on: ubuntu-latest
+    env:
+      AUTO_PUBLISH: "false"
+      RUN_LIVE_TESTS: "false"
+      GEMINI_API_KEY: ""
+      GROQ_API_KEY: ""
+      BINANCE_SQUARE_API_KEY: ""
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

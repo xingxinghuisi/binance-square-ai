@@ -1,4 +1,4 @@
-# Binance Square AI — Phase 1
+# Binance Square AI — Phase 1.5
 
 **English** | [简体中文](README.zh-CN.md)
 
@@ -10,6 +10,76 @@ No other legacy projects were integrated. The original MIT license and SMOServic
 **Drafts only by default: `AUTO_PUBLISH=false`. Docker Compose also forces this setting to false.**
 Phase 1 has not been deployed to production or tested with real provider credentials or real Binance Square posts.
 The documentation is bilingual; the AI writer and review dashboard currently produce Chinese content.
+
+## Phase 1.5 diagnostics and review
+
+Phase 1.5 adds real-request diagnostics and draft quality records without redesigning Phase 1.
+The backend and **all CLI commands force `AUTO_PUBLISH=false`**. The backend scheduler is also
+locked to dry run, even if the environment changes. Compose continues to force false.
+The retained publishing library is not reachable through these commands or API routes.
+Collector/AI HTTP is limited to public data and model endpoints; feed redirects stay on the
+same HTTPS host, and model credentials are never forwarded through redirects.
+
+```bash
+python -m src.cli test-ai
+python -m src.cli test-sources
+python -m src.cli collect-once
+python -m src.cli preview --limit 10
+python -m src.cli rate-draft 123 good
+python -m src.cli rate-draft 124 bad --note "开头太模板化"
+```
+
+`test-ai` independently sends a tiny JSON smoke request to each configured provider, without
+fallback, posts or queue insertion. It consumes the shared daily request budget, including retries.
+Exit codes: 0 = all configured providers passed; 1 = a configured provider failed; 2 = no keys configured.
+`test-sources` reads RSS/Spot only and persists source counts, elapsed milliseconds and sanitized errors.
+It returns 1 if any source failed. `collect-once` prints RSS counts per source, market status per pair,
+received/accepted/deduplicated/rejected events, actual Gemini/Groq HTTP attempt counts and drafts.
+Its request counts are per invocation, not the daily total; a source/writer error returns 1 while
+successful sources and accepted events remain saved. An unconfigured AI is explicitly skipped.
+
+`GET /api/status/providers` returns Gemini/Groq configured/model/reachable/last_success/last_error.
+`GET /api/status/sources` returns each source's status/latency_ms/last_success/last_error/items.
+These authenticated read-only endpoints **never trigger probes**. Records survive restarts;
+unprobed providers have `reachable=null`, sources have `status=unknown`, and changing a key/model
+invalidates previous provider observations. Reachability is the last observed attempt, not a
+continuous guarantee; a shared-budget rejection is reported explicitly. Sources use `ok`, `empty`,
+`error`, or `unknown`. Last successful timestamps remain available after subsequent failures.
+No API keys, request bodies, raw model output or signed URLs are returned in diagnostics.
+
+Queue cards, `/api/queue` and CLI preview include Event Type, Symbol, Score, Source, AI Provider,
+Generated At and full text. New AI drafts persist the provider and generation time; legacy/manual
+drafts may have unknown metadata. Preview excludes published posts and performs no network calls.
+Generated At is a Unix UTC timestamp in the API/dashboard and ISO UTC in CLI preview.
+
+Quality fields are `quality_status` (`pending`, `good`, `bad`) and `quality_note` (max 2000 characters).
+Use `POST /api/drafts/123/quality` with JSON:
+`{"quality_status":"bad","quality_note":"开头太模板化"}`. Existing admin authentication applies;
+non-JSON/cross-origin mutations are rejected. This only records human feedback and never publishes
+or automatically edits a prompt. SQLite v6 -> v7 is additive; back up the database before upgrading.
+
+Real smoke tests require explicit opt-in:
+
+```bash
+# Linux/macOS; may consume model credits if keys are configured
+RUN_LIVE_TESTS=true AUTO_PUBLISH=false python -m pytest tests/integration -q
+# Windows PowerShell
+$env:RUN_LIVE_TESTS="true"
+$env:AUTO_PUBLISH="false"
+python -m pytest tests/integration -q
+```
+
+Keep `RUN_LIVE_TESTS=false` for ordinary runs. CI forces false and supplies no real keys; mock tests
+also block external HTTP. The seven live cases cover Gemini, Groq, Binance Spot and the four RSS
+sources. Missing model keys skip only those model cases; configured failures fail with sanitized
+provider/source errors. No live case imports or calls a Square publisher.
+
+Current local results: **70 passed, 7 live tests skipped**, Ruff and compileall passed.
+Real source probes parsed Cointelegraph 30, Decrypt 30, The Block 19; CoinDesk and Binance Spot
+timed out on this network. Real AI smoke was skipped because no keys are configured here.
+Phase 1's remote CI actually passed, including Compose build/up/health; see the linked validation
+record. Phase 1.5's local Docker commands could not run because Docker is absent; its new remote
+CI result must be checked after pushing. These are not production deployments.
 
 ## Audit and retained capabilities
 
@@ -48,10 +118,11 @@ src/
   storage.py                Events, atomic enqueue/dedup, opening history, AI budget
   pipeline.py               Collect -> events -> writer -> SQLite draft queue
   scheduler.py              Independent scheduler with dry-run gates
+  diagnostics.py            Durable provider/source observations, guarded HTTP
   app.py                    Read-only dashboard, APIs, health and background workers
   cli.py                    Local text/image draft enqueue and one-shot collection
   http.py / settings.py     Shared timeout/retry policy and configuration
-db.py                       Existing database, incrementally migrated to schema v6
+db.py                       Existing database, incrementally migrated to schema v7
 services/binance.py          Preserved official v1/v2 publishing flow
 prompts/writer.txt           Editable writing prompt
 ```
@@ -68,7 +139,7 @@ flowchart LR
     Q --> S[Scheduler / Retry]
     S --> Gate{AUTO_PUBLISH}
     Gate -->|false by default| Hold[Retain draft; do not call Binance]
-    Gate -->|explicit future opt-in| Pub[Official Binance Square client]
+    Pub[Official Binance Square client retained; inactive in Phase 1.5]
 ```
 
 News collectors return `{id, source, title, summary, url, published_at, symbols}`.
@@ -130,7 +201,7 @@ Compose exposes port 8080 only on the host's `127.0.0.1` and stores SQLite/media
 It forces `AUTO_PUBLISH=false` even if `.env` contains true.
 The container runs as a non-root user and uses `/health` for health checks. Run one worker per SQLite database.
 The original local verification environment lacked Docker CLI/Engine: YAML checks and a local simulation of the container's COPY layout passed,
-but an actual container launch was not performed there. CI includes Compose build/start/health checks; see workflow results for their status.
+but an actual container launch was not performed there. Phase 1 remote CI at commit `9dd457a` **passed Compose build/up/health** ([verified run](https://github.com/xingxinghuisi/binance-square-ai/actions/runs/37589905304)). Phase 1.5 must verify its own new run after pushing.
 
 Before future access through a domain, configure a random `ADMIN_TOKEN`, retain the loopback port mapping, and use TLS in the reverse proxy.
 Browser Basic Auth uses username `admin` and the token as its password. APIs also accept `Authorization: Bearer ...`.

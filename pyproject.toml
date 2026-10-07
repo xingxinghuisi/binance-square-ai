@@ -16,3 +16,5 @@ ignore = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+markers = ["live: explicitly opted-in real AI/public-data smoke tests"]

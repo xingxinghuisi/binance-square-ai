@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from config import BINANCE_MAX_ATTEMPTS, DB_PATH, HISTORY_LIMIT
 from src.logging_config import redact
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class _Connection(sqlite3.Connection):
@@ -151,6 +151,17 @@ def init_db():
                 created_at INTEGER DEFAULT (strftime('%s','now'))
             )""")
             _set_user_version(conn, 6)
+        if v < 7:
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(binance_queue)")}
+            for name, ddl in (
+                ("ai_provider", "ALTER TABLE binance_queue ADD COLUMN ai_provider TEXT"),
+                ("generated_at", "ALTER TABLE binance_queue ADD COLUMN generated_at INTEGER"),
+                ("quality_status", "ALTER TABLE binance_queue ADD COLUMN quality_status TEXT NOT NULL DEFAULT 'pending' CHECK(quality_status IN ('pending','good','bad'))"),
+                ("quality_note", "ALTER TABLE binance_queue ADD COLUMN quality_note TEXT NOT NULL DEFAULT ''"),
+            ):
+                if name not in columns:
+                    conn.execute(ddl)
+            _set_user_version(conn, 7)
         # An interrupted content/add may have reached Binance. Do not resend blindly.
         conn.execute("UPDATE binance_queue SET status='review', last_error='interrupted publish: verify remotely' "
                      "WHERE status='publishing'")

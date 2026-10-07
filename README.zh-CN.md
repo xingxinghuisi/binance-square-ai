@@ -1,4 +1,4 @@
-# Binance Square AI — Phase 1
+# Binance Square AI — Phase 1.5
 
 [English](README.md) | **简体中文**
 
@@ -8,6 +8,69 @@
 
 **默认只生成草稿：`AUTO_PUBLISH=false`。Docker Compose 强制该值为 false。**
 没有部署生产环境，没有使用真实密钥或向 Binance 发布帖子。
+
+## Phase 1.5 诊断与人工质量记录
+
+在 Phase 1 上增量增加真实请求诊断和草稿质量记录，不重新设计原有架构。
+后台和**所有 CLI 命令强制 `AUTO_PUBLISH=false`**，后台 scheduler 额外锁定 dry run，
+即使进程环境后来变为 true 也不会发布；Compose 继续强制 false。
+原官方发布库继续保留，但本阶段命令和 API 无法触发它。
+采集/AI HTTP 仅允许公共数据与模型端点；RSS 重定向只允许同一个 HTTPS 主机，模型请求不转发凭据。
+
+```bash
+python -m src.cli test-ai
+python -m src.cli test-sources
+python -m src.cli collect-once
+python -m src.cli preview --limit 10
+python -m src.cli rate-draft 123 good
+python -m src.cli rate-draft 124 bad --note "开头太模板化"
+```
+
+`test-ai` 分别对每个已配置模型发送最小 JSON smoke 请求，不走 fallback、不生成帖子或入队；
+包含重试在内的请求计入原持久化日预算。退出码：0=已配置模型均成功，1=有模型失败，2=均未配置。
+`test-sources` 只读取 RSS/Spot，持久化条目数、请求耗时（毫秒）和安全错误，有源失败时退出 1。
+`collect-once` 分别输出每个 RSS 条目数、每个交易对状态、事件 received/accepted/deduplicated/rejected、
+本次 Gemini/Groq 实际 HTTP 尝试数与草稿数。请求数不是当日累计；部分源/Writer 失败时退出 1，
+仍保存成功来源和已接受事件；未配置模型时明确显示跳过。
+
+`GET /api/status/providers` 返回 Gemini/Groq 的 configured/model/reachable/last_success/last_error。
+`GET /api/status/sources` 返回各源的 status/latency_ms/last_success/last_error/items。
+两个接口沿用后台鉴权，**仅读取 SQLite，不发起实时探测或消耗额度**。记录重启后保留；
+未探测模型 reachable=null，未探测数据源 status=unknown；更换 Key/模型后旧可达性不沿用。
+可达性表示最后一次尝试结果，不是持续在线保证；内部预算拒绝会明确记录。
+源状态为 ok/empty/error/unknown；后续失败不会抹掉 last_success。诊断不会返回 API Key、
+请求体、原始模型回复或签名 URL。
+
+Queue 卡片、`/api/queue` 和 CLI Preview 显示 Event Type、Symbol、Score、Source、AI Provider、
+Generated At 及完整正文。新 AI 草稿保存模型与生成时间；旧草稿/手工草稿可能缺少元数据。
+Preview 排除已发布帖子，仅查询数据库，不调用网络。
+API/后台 Generated At 为 Unix UTC 秒，CLI 显示 ISO UTC。
+
+草稿新增 `quality_status`（pending/good/bad）和 `quality_note`（最长 2000 字符）。
+也可 `POST /api/drafts/123/quality`，使用 JSON：
+`{"quality_status":"bad","quality_note":"开头太模板化"}`。沿用已有 admin 鉴权，拒绝非 JSON
+和跨域写请求。仅记录人工反馈，不发布、不自动改 Prompt。SQLite v6 -> v7 增量迁移；升级前备份 DB。
+
+真实 smoke 只在显式开启时运行：
+
+```bash
+# Linux/macOS：有 Key 时会消耗模型额度
+RUN_LIVE_TESTS=true AUTO_PUBLISH=false python -m pytest tests/integration -q
+# Windows PowerShell
+$env:RUN_LIVE_TESTS="true"
+$env:AUTO_PUBLISH="false"
+python -m pytest tests/integration -q
+```
+
+日常保持 `RUN_LIVE_TESTS=false`。CI 强制 false，不注入真实 Key；mock 测试也拦截外部 HTTP。
+7 项 live cases 覆盖 Gemini、Groq、Binance Spot 和四个 RSS。缺少 Key 只跳过对应模型；
+已配置模型/数据源失败会报错，错误内容脱敏。live cases 不导入或调用 Square publisher。
+
+本地实际结果：**70 passed、7 live tests skipped**，Ruff 和 compileall 通过。
+真实探测 Cointelegraph 30 条、Decrypt 30 条、The Block 19 条；CoinDesk 和 Binance Spot 当前网络超时。
+因当前无 Gemini/Groq Key，真实模型未调用。Phase 1 远程 CI 已实际通过 Compose build/up/health，
+见验证记录；Phase 1.5 本机缺 Docker，容器检查需推送后核对新 CI，不能提前宣称通过。
+这些验证不涉及生产部署。
 
 ## 审计结论
 
@@ -43,10 +106,11 @@ src/
   storage.py                事件、原子去重/入队、开头历史、AI 请求预算
   pipeline.py               采集 → 事件 → Writer → SQLite 草稿队列
   scheduler.py              独立发布调度，dry-run 门控
+  diagnostics.py            持久化模型/源诊断、只读 HTTP 白名单
   app.py                    只读后台、API、health、后台任务
   cli.py                    本地手动图文入队 / 单次采集
   http.py / settings.py     公共 timeout/retry 和配置
-db.py                       复用上游 DB，增量迁移到 schema v6
+db.py                       复用上游 DB，增量迁移到 schema v7
 services/binance.py          复用官方 v1/v2 text/image 发布流程
 prompts/writer.txt           可编辑 Prompt
 ```
@@ -63,7 +127,7 @@ flowchart LR
     Q --> S[Scheduler / Retry]
     S --> Gate{AUTO_PUBLISH}
     Gate -->|false 默认| Hold[保留草稿，不调用 Binance]
-    Gate -->|未来明确开启| Pub[原官方 Binance Square 客户端]
+    Pub[原官方客户端保留；Phase 1.5 不启用]
 ```
 
 新闻统一返回 `{id, source, title, summary, url, published_at, symbols}`。
@@ -119,7 +183,7 @@ Compose 只把 8080 映射到宿主机 `127.0.0.1`，SQLite 和图片放在 `bot
 即使 `.env` 中误设 true，Compose 仍强制 `AUTO_PUBLISH=false`。
 容器以非 root 用户运行，使用 `/health` healthcheck。不要同时运行多个共享该 DB 的 worker。
 此次环境没有 Docker CLI，因此这里只完成静态配置检查和同入口的本地进程实启；容器实启未核验。
-CI 已新增 Compose build/up/health smoke 步骤，但未声称远程 CI 已执行。
+Phase 1 远程 CI 已在 `9dd457a` **实际通过 Compose build/up/health**：[已核验运行](https://github.com/xingxinghuisi/binance-square-ai/actions/runs/37589905304)。Phase 1.5 需另行核对推送后的新 CI。
 
 若以后通过域名反代访问，先设置随机 `ADMIN_TOKEN`，保留 loopback 端口映射，并在反向代理配置 TLS。
 浏览器使用 Basic 登录：用户名 `admin`，密码为该 token；API 支持 `Authorization: Bearer ...`。

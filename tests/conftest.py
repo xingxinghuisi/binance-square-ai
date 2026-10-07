@@ -25,3 +25,19 @@ def db(tmp_path):
     db_module.DB_PATH = tmp_path / "bot.db"
     db_module.init_db()
     return db_module
+
+
+@pytest.fixture(autouse=True)
+def prevent_unrequested_external_http(request, monkeypatch):
+    # Even a developer's configured .env cannot make ordinary tests spend credits.
+    if request.node.get_closest_marker("live") and os.getenv("RUN_LIVE_TESTS", "false").lower() == "true":
+        return
+    import aiohttp
+    from urllib.parse import urlsplit
+    original = aiohttp.ClientSession._request
+
+    async def local_only(self, method, url, *args, **kwargs):
+        if urlsplit(str(url)).hostname not in {"127.0.0.1", "localhost", "::1"}:
+            raise AssertionError("External HTTP denied in mock test mode")
+        return await original(self, method, url, *args, **kwargs)
+    monkeypatch.setattr(aiohttp.ClientSession, "_request", local_only)

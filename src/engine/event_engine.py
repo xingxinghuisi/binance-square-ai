@@ -21,8 +21,11 @@ class EventEngine:
                 "data": snapshot, "source": snapshot["source"]}
 
     def ingest(self, event: dict) -> bool:
+        return self.ingest_result(event) == "accepted"
+
+    def ingest_result(self, event: dict) -> str:
         if not rules.allowed(event, min_score=self.min_score, max_age=self.max_age):
-            return False
+            return "rejected"
         key = fingerprint(event)
         event_id = hashlib.sha256((event["type"] + key).encode()).hexdigest()
-        return self.store.save_event(event_id, key, event)
+        return "accepted" if self.store.save_event(event_id, key, event) else "deduplicated"

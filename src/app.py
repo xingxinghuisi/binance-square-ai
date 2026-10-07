@@ -5,13 +5,14 @@ import base64
 import hmac
 import html
 import logging
+import os
 import time
 from contextlib import suppress
 
 from aiohttp import web
 
 import db
-from src.http import HTTPClient
+from src.diagnostics import ReadOnlyHTTPClient, providers_status, sources_status
 from src.pipeline import Pipeline
 from src.publisher.binance_square import BinanceSquarePublisher
 from src.scheduler import Scheduler
@@ -83,6 +84,34 @@ async def queue_api(request):
     return web.json_response(request.app[STORE].queue(*pagination(request)))
 
 
+async def providers_api(request):
+    return web.json_response(providers_status(request.app[SETTINGS], request.app[STORE]),
+                             headers={"Cache-Control": "no-store"})
+
+
+async def sources_api(request):
+    return web.json_response(sources_status(request.app[STORE]), headers={"Cache-Control": "no-store"})
+
+
+async def quality_api(request):
+    if request.content_type != "application/json":
+        raise web.HTTPBadRequest(text="JSON body required")
+    origin = request.headers.get("Origin")
+    if origin and origin != f"{request.scheme}://{request.host}":
+        raise web.HTTPForbidden(text="cross-origin mutation denied")
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError
+        post = request.app[STORE].rate_draft(int(request.match_info["post_id"]), body.get("quality_status"),
+                                             body.get("quality_note", ""))
+    except (ValueError, TypeError, KeyError) as exc:
+        raise web.HTTPBadRequest(text="invalid draft id or quality status/note") from exc
+    except LookupError as exc:
+        raise web.HTTPNotFound(text="draft not found") from exc
+    return web.json_response(post)
+
+
 async def events_api(request):
     return web.json_response(request.app[STORE].events(*pagination(request)))
 
@@ -97,6 +126,10 @@ async def index(request):
     limit, offset = pagination(request)
     posts, events, logs = store.queue(limit, offset), store.events(limit, offset), db.list_history(limit, offset)
     cards = "".join(f'<article><div class="meta">#{p["id"]} · {esc(p["status"])} · 尝试 {p["attempt_count"] or 0}</div>'
+                    f'<p class="meta">Event Type: {esc(p.get("event_type") or "manual")} · Symbol: {esc(p.get("symbol") or "—")} · '
+                    f'Score: {p.get("score") if p.get("score") is not None else "—"} · Source: {esc(p.get("source") or "manual")} · '
+                    f'AI Provider: {esc(p.get("ai_provider") or "—")} · Generated At: {p.get("generated_at") or "—"}</p>'
+                    f'<p>Quality: {esc(p["quality_status"])} · {esc(p["quality_note"])}</p>'
                     f'<pre>{esc(p["text"])}</pre><small>媒体：{esc(p.get("image_paths") or "[]")}</small>'
                     f'<p class="error">{esc(p.get("last_error") or "")}</p></article>' for p in posts)
     event_rows = "".join(f'<tr><td>{esc(e["event"]["source"])}</td><td>{esc(e["event"]["type"])}</td>'
@@ -106,7 +139,7 @@ async def index(request):
                        f'<td>{esc(log.get("text_preview") or "")}</td><td>{esc(log.get("error") or "")}</td></tr>' for log in logs)
     mode = "自动发布开启" if publishing_enabled() else "DRY RUN · 真实发布关闭"
     body = f'''<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>Binance Square AI · Phase 1</title><style>
+<title>Binance Square AI · Phase 1.5</title><style>
 body{{background:#101317;color:#edf0f4;font:16px system-ui;margin:0}}main{{max-width:1080px;margin:auto;padding:28px}}
 header{{display:flex;justify-content:space-between;align-items:center;gap:20px;flex-wrap:wrap}}h1{{font-size:26px}}
 .badge{{background:#332d15;color:#f0b90b;padding:10px 16px;border-radius:8px}}a{{color:#f0b90b}}
@@ -115,7 +148,7 @@ pre{{white-space:pre-wrap;overflow-wrap:anywhere;font:16px/1.8 system-ui}}.meta,
 .error{{color:#f49a9a}}table{{width:100%;border-collapse:collapse;font-size:14px}}td,th{{text-align:left;border-bottom:1px solid #303744;padding:12px;overflow-wrap:anywhere}}
 .scroll{{overflow-x:auto}}nav{{margin:24px 0}}h2{{margin-top:38px}}</style><main>
 <header><h1>Binance Square AI</h1><span class="badge">{mode}</span></header>
-<p>Phase 1 · 采集 → 事件 → 中文草稿 → SQLite 队列</p><nav><a href="#queue">帖子队列</a> · <a href="#events">事件</a> · <a href="#logs">日志</a> · <a href="/health">健康状态</a></nav>
+<p>Phase 1.5 · 采集 → 事件 → 中文草稿 → SQLite 队列</p><nav><a href="#queue">帖子队列</a> · <a href="#events">事件</a> · <a href="#logs">日志</a> · <a href="/health">健康状态</a></nav>
 <p>后台只读。刷新页面查看最新草稿；没有真实发布按钮。</p>
 <h2 id="queue">帖子队列</h2>{cards or '<p>尚无草稿。配置模型后等待采集，或使用本地 CLI 将图文入队。</p>'}
 <h2 id="events">事件记录</h2><div class="scroll"><table><tr><th>来源</th><th>类型</th><th>币种</th><th>评分</th><th>状态</th><th>错误</th></tr>{event_rows}</table></div>
@@ -129,9 +162,9 @@ pre{{white-space:pre-wrap;overflow-wrap:anywhere;font:16px/1.8 system-ui}}.meta,
 
 async def background(app):
     settings, store = app[SETTINGS], app[STORE]
-    http = HTTPClient(timeout=settings.http_timeout, attempts=settings.http_attempts)
+    http = ReadOnlyHTTPClient(timeout=settings.http_timeout, attempts=settings.http_attempts)
     pipeline = Pipeline(settings, store, http)
-    scheduler = Scheduler(store, BinanceSquarePublisher(settings.media_root))
+    scheduler = Scheduler(store, BinanceSquarePublisher(settings.media_root), dry_run=True)
 
     async def loop(name, interval, action):
         while True:
@@ -156,6 +189,7 @@ async def background(app):
 
 
 def create_app(settings: Settings | None = None, *, start_workers: bool = True) -> web.Application:
+    os.environ["AUTO_PUBLISH"] = "false"  # Phase 1.5 backend cannot opt in to publishing.
     settings = settings or Settings()
     db.init_db()
     app = web.Application(middlewares=[admin_auth])
@@ -165,14 +199,18 @@ def create_app(settings: Settings | None = None, *, start_workers: bool = True) 
     app.router.add_get("/api/queue", queue_api)
     app.router.add_get("/api/events", events_api)
     app.router.add_get("/api/logs", logs_api)
+    app.router.add_get("/api/status/providers", providers_api)
+    app.router.add_get("/api/status/sources", sources_api)
+    app.router.add_post("/api/drafts/{post_id}/quality", quality_api)
     if start_workers:
         app.cleanup_ctx.append(background)
     return app
 
 
 def main():
+    os.environ["AUTO_PUBLISH"] = "false"
     settings = Settings()
-    logger.info("Starting Phase 1 backend; auto_publish=%s", publishing_enabled())
+    logger.info("Starting Phase 1.5 backend; auto_publish=%s", publishing_enabled())
     web.run_app(create_app(settings), host=settings.host, port=settings.port, access_log=None)
 
 

@@ -4,6 +4,7 @@ import calendar
 import hashlib
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from html import unescape
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -11,6 +12,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import feedparser
 
 from src.http import HTTPClient
+from src.diagnostics import safe_error
 
 logger = logging.getLogger(__name__)
 RSS_FEEDS = {
@@ -51,9 +53,11 @@ def extract_symbols(text: str) -> list[str]:
 
 
 class CryptoNewsCollector:
-    def __init__(self, http: HTTPClient, feeds: dict[str, str] | None = None, *, max_items: int = 30):
+    def __init__(self, http: HTTPClient, feeds: dict[str, str] | None = None, *, max_items: int = 30, observer=None):
         self.http, self.feeds, self.max_items = http, RSS_FEEDS if feeds is None else feeds, max_items
         self.last_errors: list[dict] = []
+        self.last_counts: dict[str, int] = {}
+        self.observer = observer
 
     @staticmethod
     def parse(source: str, body: bytes, *, max_items: int = 30) -> list[dict]:
@@ -88,12 +92,22 @@ class CryptoNewsCollector:
     async def collect(self) -> list[dict]:
         result = []
         self.last_errors = []
+        self.last_counts = {}
         for source, url in self.feeds.items():
+            started = time.monotonic()
             try:
                 response = await self.http.request("GET", url, headers={"User-Agent": "BinanceSquareAI/Phase1 RSS"})
-                result.extend(self.parse(source, response.body, max_items=self.max_items))
+                rows = self.parse(source, response.body, max_items=self.max_items)
+                result.extend(rows)
+                self.last_counts[source] = len(rows)
+                if self.observer:
+                    self.observer(source, success=True, started=started, items=len(rows))
             except Exception as exc:
                 # One blocked/unavailable feed must not stop the remaining collectors.
                 logger.warning("RSS source %s unavailable (%s)", source, type(exc).__name__)
-                self.last_errors.append({"source": source, "error": type(exc).__name__})
+                self.last_counts[source] = 0
+                error = safe_error(exc)
+                self.last_errors.append({"source": source, "error": error})
+                if self.observer:
+                    self.observer(source, success=False, started=started, error=error)
         return result

@@ -40,7 +40,7 @@ class FallbackProvider:
         raise ProviderError("No configured AI provider succeeded")
 
 
-def build_provider(settings: Settings, http: HTTPClient, budget=None) -> FallbackProvider:
+def build_provider(settings: Settings, http: HTTPClient, budget=None, *, store=None) -> FallbackProvider:
     from src.ai.gemini import GeminiProvider
     from src.ai.groq import GroqProvider
 
@@ -49,4 +49,13 @@ def build_provider(settings: Settings, http: HTTPClient, budget=None) -> Fallbac
         providers.append(GeminiProvider(http, settings.gemini_api_key, settings.gemini_model, budget))
     if settings.groq_api_key:
         providers.append(GroqProvider(http, settings.groq_api_key, settings.groq_model, budget))
+    if store is not None:
+        from src.diagnostics import ObservedProvider
+        def reserve(provider):
+            store.reserve_ai_request(settings.ai_requests_per_day, provider.name)
+            provider.request_count += 1
+        for provider in providers:
+            provider.request_count = 0
+            provider.budget = lambda provider=provider: reserve(provider)
+        providers = [ObservedProvider(provider, store) for provider in providers]
     return FallbackProvider(providers)

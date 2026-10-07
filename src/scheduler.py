@@ -13,11 +13,12 @@ logger = logging.getLogger(__name__)
 
 
 class Scheduler:
-    def __init__(self, store, publisher):
+    def __init__(self, store, publisher, *, dry_run: bool = False):
         self.store, self.publisher = store, publisher
+        self.dry_run = dry_run
 
     async def publish_one(self, post: dict) -> str:
-        if not publishing_enabled():
+        if self.dry_run or not publishing_enabled():
             return "dry_run"
         if not db.claim_binance_post(post["id"]):
             return "skip"
@@ -60,10 +61,10 @@ class Scheduler:
 
     async def tick(self):
         db.cleanup_published_binance(BINANCE_PUBLISHED_TTL_DAYS)
-        if not publishing_enabled() or db.is_binance_paused() or db.get_binance_quota_hold() > time.time():
+        if self.dry_run or not publishing_enabled() or db.is_binance_paused() or db.get_binance_quota_hold() > time.time():
             return
         for post in db.get_pending_binance_posts()[:20]:
-            if db.is_binance_paused() or not publishing_enabled():
+            if self.dry_run or db.is_binance_paused() or not publishing_enabled():
                 break
             outcome = await self.publish_one(post)
             logger.info("Queue post #%s outcome=%s", post["id"], outcome)

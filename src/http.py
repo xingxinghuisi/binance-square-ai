@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import aiohttp
 
@@ -24,6 +24,7 @@ class BudgetExceeded(RuntimeError):
 class Response:
     status: int
     body: bytes
+    headers: dict[str, str] = field(default_factory=dict)
 
     def json(self):
         try:
@@ -63,7 +64,7 @@ class HTTPClient:
                         parts.extend(chunk)
                         if len(parts) > max_bytes:
                             raise HTTPFailure(resp.status)
-                    response = Response(resp.status, bytes(parts))
+                    response = Response(resp.status, bytes(parts), dict(resp.headers))
                     transient = resp.status == 429 or resp.status >= 500
                     if transient and retry and attempt + 1 < attempts:
                         pass

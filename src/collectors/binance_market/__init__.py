@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from src.http import HTTPClient
+from src.diagnostics import safe_error
 
 
 def decimal_string(value, *, signed: bool = False) -> str:
@@ -24,10 +26,11 @@ def decimal_string(value, *, signed: bool = False) -> str:
 class BinanceMarketCollector:
     BASE = "https://api.binance.com/api/v3"
 
-    def __init__(self, http: HTTPClient, symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT")):
+    def __init__(self, http: HTTPClient, symbols: tuple[str, ...] = ("BTCUSDT", "ETHUSDT"), *, observer=None):
         if not symbols or len(symbols) > 20 or any(not re.fullmatch(r"[A-Z0-9]{3,24}", s) for s in symbols):
             raise ValueError("MARKET_SYMBOLS must contain 1–20 Binance trading pairs")
         self.http, self.symbols = http, symbols
+        self.observer = observer
         self.assets: dict[str, tuple[str, str]] = {}
 
     @staticmethod
@@ -46,6 +49,18 @@ class BinanceMarketCollector:
         return result
 
     async def collect(self) -> list[dict]:
+        started = time.monotonic()
+        try:
+            rows = await self._collect()
+        except Exception as exc:
+            if self.observer:
+                self.observer("Binance Spot", success=False, started=started, error=safe_error(exc))
+            raise
+        if self.observer:
+            self.observer("Binance Spot", success=True, started=started, items=len(rows))
+        return rows
+
+    async def _collect(self) -> list[dict]:
         params = {"symbols": json.dumps(self.symbols, separators=(",", ":"))}
         if not self.assets:
             info = await self.http.json("GET", f"{self.BASE}/exchangeInfo", params=params)

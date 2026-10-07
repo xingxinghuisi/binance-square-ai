@@ -1,52 +1,129 @@
-"""Local commands prepare drafts only. No publish command is exposed."""
+"""Phase 1.5 local diagnostics and draft review. Never publish to Binance Square."""
 from __future__ import annotations
 
 import argparse
 import asyncio
-import json
+import os
 from datetime import datetime
 
 import db
-from src.http import HTTPClient
+from src.diagnostics import ReadOnlyHTTPClient, test_ai as probe_ai, test_sources as probe_sources
 from src.pipeline import Pipeline
-from src.publisher.binance_square import BinanceSquarePublisher
 from src.settings import Settings
 from src.storage import Store
 
 
-def main():
+def print_collection(stats):
+    print("RSS:")
+    from src.collectors.crypto_news import RSS_FEEDS
+    for source in RSS_FEEDS:
+        print(f"  {source}: {stats['rss'].get(source, 0)}")
+    print("Market:")
+    for symbol, status in stats["market_symbols"].items():
+        print(f"  {symbol}: {status}")
+    print("Events:")
+    for field, value in stats["events"].items():
+        print(f"  {field}: {value}")
+    print("AI:")
+    print(f"  Gemini requests: {stats['ai']['gemini_requests']}")
+    print(f"  Groq requests: {stats['ai']['groq_requests']}")
+    print(f"  drafts: {stats['drafts']}")
+    for error in stats["errors"]:
+        print(f"ERROR [{error['source']}]: {error['error']}")
+    print("DRY RUN: no Binance Square requests or image uploads")
+
+
+def print_preview(posts):
+    if not posts:
+        print("No drafts")
+    for post in posts:
+        print(f"--- Draft #{post['id']} ---")
+        for title, field in (("Event Type", "event_type"), ("Source", "source"), ("Symbol", "symbol"),
+                             ("Score", "score"), ("AI Provider", "ai_provider"), ("Generated At", "generated_at"),
+                             ("Quality", "quality_status"), ("Quality Note", "quality_note")):
+            value = post.get(field)
+            if field == "generated_at" and value:
+                from datetime import timezone
+                value = datetime.fromtimestamp(value, timezone.utc).isoformat()
+            print(f"{title}: {value if value is not None else '—'}")
+        print(post["text"])
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("collect-once", help="Collect RSS and market, generate dry-run drafts")
+    commands.add_parser("test-ai", help="Probe each configured AI with a tiny JSON request; no posts")
+    commands.add_parser("test-sources", help="Read public market/RSS data; no AI, events or posts")
+    preview = commands.add_parser("preview", help="Print complete latest drafts; no network")
+    preview.add_argument("--limit", type=int, default=10)
+    rate = commands.add_parser("rate-draft", help="Record manual draft quality; no network")
+    rate.add_argument("id", type=int)
+    rate.add_argument("quality_status", choices=("pending", "good", "bad"))
+    rate.add_argument("--note", default="")
     enqueue = commands.add_parser("enqueue", help="Store a local text/image draft without sending")
     enqueue.add_argument("--text", required=True)
     enqueue.add_argument("--image", action="append", default=[], help="Image path relative to MEDIA_ROOT; up to four")
     enqueue.add_argument("--publish-at", help="ISO-8601 timestamp with timezone")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    os.environ["AUTO_PUBLISH"] = "false"
     settings, store = Settings(), Store()
     db.init_db()
+    http = ReadOnlyHTTPClient(timeout=settings.http_timeout, attempts=settings.http_attempts)
+    if args.command == "test-ai":
+        states = asyncio.run(probe_ai(settings, store, http))
+        for name, state in states.items():
+            status = "SKIP (not configured)" if not state["configured"] else "OK" if state["reachable"] else "FAILED"
+            print(f"{name.title()}: {status}; model={state['model']}")
+            if state["last_error"]:
+                print(f"  {state['last_error']}")
+        configured = [s for s in states.values() if s["configured"]]
+        return 2 if not configured else int(any(not s["reachable"] for s in configured))
+    if args.command == "test-sources":
+        states = asyncio.run(probe_sources(settings, store, http))
+        for state in states:
+            print(f"{state['source']}: {state['status']}; items={state['items']}; latency_ms={state['latency_ms']}")
+            if state["last_error"]:
+                print(f"  ERROR [{state['source']}]: {state['last_error']}")
+        return int(any(s["status"] == "error" for s in states))
     if args.command == "collect-once":
-        print(json.dumps(asyncio.run(Pipeline(settings, store, HTTPClient(
-            timeout=settings.http_timeout, attempts=settings.http_attempts)).collect_once()), ensure_ascii=False))
-    else:
-        if len(args.text) > settings.max_chars:
-            parser.error("text exceeds WRITER_MAX_CHARS")
+        stats = asyncio.run(Pipeline(settings, store, http).collect_once())
+        print_collection(stats)
+        if not (settings.gemini_api_key or settings.groq_api_key):
+            print("AI: SKIP (no configured provider); accepted events remain in SQLite")
+        return int(bool(stats["errors"]))
+    if args.command == "preview":
+        if not 1 <= args.limit <= 200:
+            parser.error("limit must be between 1 and 200")
+        print_preview(store.preview(args.limit))
+        return 0
+    if args.command == "rate-draft":
         try:
-            BinanceSquarePublisher(settings.media_root).image_files(args.image)
-            publish_at = None
-            if args.publish_at:
-                date = datetime.fromisoformat(args.publish_at.replace("Z", "+00:00"))
-                if date.tzinfo is None:
-                    raise ValueError("publish-at requires a timezone")
-                publish_at = int(date.timestamp())
-            pid = store.enqueue(args.text, image_paths=args.image, publish_at=publish_at)
-        except (ValueError, OSError) as exc:
+            post = store.rate_draft(args.id, args.quality_status, args.note)
+        except (ValueError, LookupError) as exc:
             parser.error(str(exc))
-        if pid is None:
-            parser.error("duplicate draft")
-        db.log_history(kind="draft", service="manual", status="prepared", text_preview=args.text, ext_id=str(pid))
-        print(f"Prepared draft #{pid}; no post was sent")
+        print(f"Draft #{post['id']}: {post['quality_status']}")
+        return 0
+    if len(args.text) > settings.max_chars:
+        parser.error("text exceeds WRITER_MAX_CHARS")
+    try:
+        from src.publisher.binance_square import BinanceSquarePublisher
+        BinanceSquarePublisher(settings.media_root).image_files(args.image)
+        publish_at = None
+        if args.publish_at:
+            date = datetime.fromisoformat(args.publish_at.replace("Z", "+00:00"))
+            if date.tzinfo is None:
+                raise ValueError("publish-at requires a timezone")
+            publish_at = int(date.timestamp())
+        pid = store.enqueue(args.text, image_paths=args.image, publish_at=publish_at)
+    except (ValueError, OSError) as exc:
+        parser.error(str(exc))
+    if pid is None:
+        parser.error("duplicate draft")
+    db.log_history(kind="draft", service="manual", status="prepared", text_preview=args.text, ext_id=str(pid))
+    print(f"Prepared draft #{pid}; no post was sent")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
