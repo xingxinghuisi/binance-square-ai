@@ -77,9 +77,10 @@ provider/source errors. No live case imports or calls a Square publisher.
 Current local results: **70 passed, 7 live tests skipped**, Ruff and compileall passed.
 Real source probes parsed Cointelegraph 30, Decrypt 30, The Block 19; CoinDesk and Binance Spot
 timed out on this network. Real AI smoke was skipped because no keys are configured here.
-Phase 1's remote CI actually passed, including Compose build/up/health; see the linked validation
-record. Phase 1.5's local Docker commands could not run because Docker is absent; its new remote
-CI result must be checked after pushing. These are not production deployments.
+Phase 1.5 remote CI at commit `d5e9bf2` **passed pytest, Ruff, compileall, independent import and
+Compose build/up/health** ([verified run](https://github.com/xingxinghuisi/binance-square-ai/actions/runs/37593756735)).
+Local Docker commands could not run because Docker is absent; the actual container checks ran
+in GitHub Actions. These are not production deployments.
 
 ## Audit and retained capabilities
 
@@ -201,7 +202,7 @@ Compose exposes port 8080 only on the host's `127.0.0.1` and stores SQLite/media
 It forces `AUTO_PUBLISH=false` even if `.env` contains true.
 The container runs as a non-root user and uses `/health` for health checks. Run one worker per SQLite database.
 The original local verification environment lacked Docker CLI/Engine: YAML checks and a local simulation of the container's COPY layout passed,
-but an actual container launch was not performed there. Phase 1 remote CI at commit `9dd457a` **passed Compose build/up/health** ([verified run](https://github.com/xingxinghuisi/binance-square-ai/actions/runs/37589905304)). Phase 1.5 must verify its own new run after pushing.
+but an actual container launch was not performed there. Phase 1 remote CI at commit `9dd457a` **passed Compose build/up/health** ([verified run](https://github.com/xingxinghuisi/binance-square-ai/actions/runs/37589905304)). Phase 1.5 separately **passed Compose build/up/health** at commit `d5e9bf2` ([verified run](https://github.com/xingxinghuisi/binance-square-ai/actions/runs/37593756735)).
 
 Before future access through a domain, configure a random `ADMIN_TOKEN`, retain the loopback port mapping, and use TLS in the reverse proxy.
 Browser Basic Auth uses username `admin` and the token as its password. APIs also accept `Authorization: Bearer ...`.

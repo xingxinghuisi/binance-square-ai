@@ -68,9 +68,10 @@ python -m pytest tests/integration -q
 
 本地实际结果：**70 passed、7 live tests skipped**，Ruff 和 compileall 通过。
 真实探测 Cointelegraph 30 条、Decrypt 30 条、The Block 19 条；CoinDesk 和 Binance Spot 当前网络超时。
-因当前无 Gemini/Groq Key，真实模型未调用。Phase 1 远程 CI 已实际通过 Compose build/up/health，
-见验证记录；Phase 1.5 本机缺 Docker，容器检查需推送后核对新 CI，不能提前宣称通过。
-这些验证不涉及生产部署。
+因当前无 Gemini/Groq Key，真实模型未调用。Phase 1.5 在提交 `d5e9bf2` 的远程 CI 中已实际通过
+pytest、Ruff、compileall、独立 import 和 Compose build/up/health：
+[已核验运行](https://github.com/xingxinghuisi/binance-square-ai/actions/runs/37593756735)。
+本机缺 Docker，真实容器检查在 GitHub Actions 执行。这些验证不涉及生产部署。
 
 ## 审计结论
 
@@ -183,7 +184,7 @@ Compose 只把 8080 映射到宿主机 `127.0.0.1`，SQLite 和图片放在 `bot
 即使 `.env` 中误设 true，Compose 仍强制 `AUTO_PUBLISH=false`。
 容器以非 root 用户运行，使用 `/health` healthcheck。不要同时运行多个共享该 DB 的 worker。
 此次环境没有 Docker CLI，因此这里只完成静态配置检查和同入口的本地进程实启；容器实启未核验。
-Phase 1 远程 CI 已在 `9dd457a` **实际通过 Compose build/up/health**：[已核验运行](https://github.com/xingxinghuisi/binance-square-ai/actions/runs/37589905304)。Phase 1.5 需另行核对推送后的新 CI。
+Phase 1 远程 CI 已在 `9dd457a` **实际通过 Compose build/up/health**：[已核验运行](https://github.com/xingxinghuisi/binance-square-ai/actions/runs/37589905304)。Phase 1.5 也已在 `d5e9bf2` **独立通过 Compose build/up/health**：[已核验运行](https://github.com/xingxinghuisi/binance-square-ai/actions/runs/37593756735)。
 
 若以后通过域名反代访问，先设置随机 `ADMIN_TOKEN`，保留 loopback 端口映射，并在反向代理配置 TLS。
 浏览器使用 Basic 登录：用户名 `admin`，密码为该 token；API 支持 `Authorization: Bearer ...`。

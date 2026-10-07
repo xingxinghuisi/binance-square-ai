@@ -53,6 +53,8 @@
 
 - **Phase 1 远程 CI 已实际执行且成功**：commit `9dd457a69691dae1f4c2228b12f275f8f6f9a78d`，
   [run 37589905304](https://github.com/xingxinghuisi/binance-square-ai/actions/runs/37589905304)；pytest、Ruff、compileall、独立 import、Compose build/up/health 均通过。
+- **Phase 1.5 远程 CI 已实际执行且成功**：commit `d5e9bf293c9d4109b6b4ff4beef017be926c4f23`，
+  [run 37593756735](https://github.com/xingxinghuisi/binance-square-ai/actions/runs/37593756735)；pytest、Ruff、compileall、独立 import、Compose build/up/health 均通过。
 
 ## 未执行的验证
 
@@ -84,7 +86,9 @@
   Gemini requests=0、Groq requests=0、drafts=0（当前未配置模型）。成功数据保存为事件，未发布。
 - `test-ai`：Gemini/Groq 均明确 SKIP，因当前无 API Key，退出 2。**未声称真实 AI 验证通过**。
 - 普通全量测试默认跳过全部 7 项 live cases；未开启 RUN_LIVE_TESTS，未消耗真实模型额度。
-- 本机 `docker compose build/up/ps` 因找不到 Docker 命令而未执行容器，
-  **Phase 1.5 真实容器验证仍待新提交推送后的 CI**。Phase 1 成功不替代 Phase 1.5 结果。
+- 本机 `docker compose build/up/ps` 因找不到 Docker 命令而未执行容器；
+  **Phase 1.5 真实容器验证已在 GitHub Actions 完成**：提交 `d5e9bf2` 的
+  [run 37593756735](https://github.com/xingxinghuisi/binance-square-ai/actions/runs/37593756735)
+  中 Compose build/up/health 步骤成功，容器诊断与清理也成功。该结果独立于 Phase 1。
 - CI 显式 RUN_LIVE_TESTS=false、AUTO_PUBLISH=false、真实 Key 留空；新增测试继续用 mock。
 - 未连接 VPS、未部署生产环境，未调用 content/add、image/presignedUrl 或其他真实发布接口。
