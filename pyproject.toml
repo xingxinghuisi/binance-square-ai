@@ -1,0 +1,18 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+ignore = [
+    "E501",  # line too long — long log strings are fine
+    "E701",  # `if cond: return` is idiomatic in this codebase
+    "B008",  # function-call-in-default-argument — aiogram patterns
+]
+
+[tool.ruff.lint.per-file-ignores]
+"bot.py" = ["E402", "F401"]  # imports after logging.basicConfig + side-effect handler imports
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

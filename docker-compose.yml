@@ -1,0 +1,31 @@
+services:
+  square-ai:
+    build: .
+    image: binance-square-ai:phase1
+    restart: unless-stopped
+    init: true
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Phase 1 locks Compose to dry-run, including if .env says true.
+      AUTO_PUBLISH: "false"
+      HOST: "0.0.0.0"
+      PORT: "8080"
+      DATABASE_URL: "${DATABASE_URL:-sqlite:////app/data/bot.db}"
+      MEDIA_ROOT: "/app/data/media"
+      # Only for this loopback mapping. Configure ADMIN_TOKEN before remote access.
+      ALLOW_UNAUTHENTICATED_ADMIN: "true"
+    ports:
+      - "127.0.0.1:${PORT:-8080}:8080"
+    volumes:
+      - bot-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+volumes:
+  bot-data:
