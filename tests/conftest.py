@@ -9,7 +9,8 @@ from pathlib import Path
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test:token")
 os.environ.setdefault("ALLOWED_USER_ID", "1")
 os.environ.setdefault("BUFFER_ACCESS_TOKEN", "test-buffer-token")
-os.environ.setdefault("DB_PATH", "/tmp/buffer-poster-test-bootstrap.db")
+os.environ.setdefault("DB_PATH", str(Path(__file__).parent / ".bootstrap.db"))
+os.environ["AUTO_PUBLISH"] = "false"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

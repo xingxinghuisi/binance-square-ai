@@ -1,47 +1,34 @@
-name: CI
-
+name: Phase 1 CI
 on:
   push:
-    branches: [main]
   pull_request:
-    branches: [main]
 
 jobs:
-  lint-and-build:
+  test-and-container:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
-
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install ruff pytest
-
-      - name: Ruff lint
-        run: ruff check .
-
-      - name: Syntax check
-        run: |
-          python -m py_compile bot.py bot_instance.py config.py db.py keyboards.py scheduler.py state.py
-          python -m py_compile services/*.py handlers/*.py
-
-      - name: Import smoke test
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: python -m compileall -q src config.py db.py services/binance.py
+      - name: Independent import without Telegram/Buffer/API keys
         env:
-          TELEGRAM_BOT_TOKEN: "0:test"
-          ALLOWED_USER_ID: "1"
-          BUFFER_ACCESS_TOKEN: "test"
-          DB_PATH: "/tmp/ci_bot.db"
-        run: python -c "import bot; print('handlers:', sum(len(o.handlers) for o in bot.dp.observers.values()))"
-
-      - name: Tests
-        run: python -m pytest tests/ -q
-
-      - name: Docker build sanity
-        run: docker build -t buffer-poster-bot:ci .
+          DATABASE_URL: sqlite:////tmp/phase1-import.db
+          AUTO_PUBLISH: "false"
+        run: python -c "from src.app import create_app; create_app(start_workers=False)"
+      - run: python -m pytest tests -q
+      - name: Compose build and local health smoke (dry run, no collectors)
+        run: |
+          printf 'COLLECT_ENABLED=false\n' > .env
+          docker compose config --quiet
+          docker compose up --build -d --wait --wait-timeout 120
+          curl --fail http://127.0.0.1:8080/health
+      - name: Container diagnostics and cleanup
+        if: always()
+        run: |
+          docker compose logs --tail=100
+          docker compose down

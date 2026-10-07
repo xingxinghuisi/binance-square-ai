@@ -36,6 +36,21 @@ def test_migration_v4_to_v5_adds_video_columns(tmp_path):
     row = db_module.get_binance_post(1)
     assert row["text"] == "старый пост"
     assert row["video_file_id"] is None
+    assert row["image_paths"] == "[]"
+    assert row["event_id"] is None
+    conn.close()
+
+
+def test_newer_schema_is_rejected_without_creating_tables(tmp_path):
+    path = tmp_path / "future.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA user_version=99")
+    db_module.DB_PATH = path
+    import pytest
+    with pytest.raises(RuntimeError, match="newer"):
+        db_module.init_db()
+    with sqlite3.connect(path) as conn:
+        assert conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == []
 
 
 def test_video_post_roundtrip(db):
@@ -134,12 +149,12 @@ def test_edit_text_does_not_touch_publishing(db):
     assert db.get_binance_post(pid)["status"] == "pending"
 
 
-def test_crash_recovery_resets_publishing(db):
+def test_crash_recovery_requires_review(db):
     pid = db.add_to_binance_queue("crashed mid-publish", [], "2026-01-01T00:00:00Z")
     assert db.claim_binance_post(pid)
     assert db.get_binance_post(pid)["status"] == "publishing"
     db.init_db()  # рестарт бота
-    assert db.get_binance_post(pid)["status"] == "pending"
+    assert db.get_binance_post(pid)["status"] == "review"
 
 
 def test_dedup_hashes(db):

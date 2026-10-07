@@ -23,6 +23,8 @@ from config import (
     BINANCE_IMAGE_FALLBACK_TEXT,
     logger,
 )
+from src.http import HTTPClient, HTTPFailure
+from src.settings import publishing_enabled
 
 DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=30)
 POLL_TIMEOUT = aiohttp.ClientTimeout(total=15)
@@ -124,18 +126,22 @@ def describe_error_code(code: str | None, message: str | None = None) -> str:
 
 
 async def _post_json(session: aiohttp.ClientSession, url: str, body: dict, *, timeout=DEFAULT_TIMEOUT) -> dict:
-    async with session.post(url, json=body, headers=_HEADERS, timeout=timeout) as resp:
-        text = await resp.text()
-        try:
-            data = await resp.json(content_type=None)
-        except aiohttp.ContentTypeError:
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
-        data["_http_status"] = resp.status
-        if resp.status >= 400 and not data.get("code"):
-            data["_raw_text"] = text[:500]
-        return data
+    if not publishing_enabled():
+        return {"code": "dry_run", "message": "AUTO_PUBLISH=false"}
+    # content/add is not idempotent. Definite failures retry via the durable queue;
+    # an unknown transport outcome is held for review instead of immediate resend.
+    response = await HTTPClient(session=session).request(
+        "POST", url, json=body, headers=_HEADERS, timeout=timeout,
+        retry=not url.endswith("/content/add"), return_errors=True,
+    )
+    try:
+        data = response.json()
+    except HTTPFailure:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    data["_http_status"] = response.status
+    return data
 
 
 def _content_type_for(image_name: str) -> str:
@@ -157,15 +163,10 @@ async def _request_image_presigned(session: aiohttp.ClientSession, image_name: s
 
 
 async def _put_bytes(session: aiohttp.ClientSession, presigned_url: str, payload: bytes, content_type: str):
-    async with session.put(
-        presigned_url,
-        data=payload,
-        headers={"Content-Type": content_type},
-        timeout=UPLOAD_TIMEOUT,
-    ) as resp:
-        if resp.status >= 400:
-            body = (await resp.text())[:500]
-            raise RuntimeError(f"presigned PUT failed status={resp.status} body={body!r}")
+    if not publishing_enabled():
+        raise UploadError("AUTO_PUBLISH=false", kind="dry_run")
+    await HTTPClient(session=session).request("PUT", presigned_url, data=payload,
+                                              headers={"Content-Type": content_type}, timeout=UPLOAD_TIMEOUT)
 
 
 async def _poll_image_status(
@@ -187,6 +188,8 @@ async def _poll_image_status(
             timeout=POLL_TIMEOUT,
         )
         payload = data.get("data") or {}
+        if data.get("code") != "000000":
+            raise UploadError(describe_error_code(data.get("code")), kind=classify_code(data.get("code")))
         status = payload.get("status")
         if status == 1:
             return payload
@@ -255,15 +258,9 @@ async def upload_video(session: aiohttp.ClientSession, video_bytes: bytes, video
     if not presigned_url or not file_ticket:
         raise RuntimeError(f"video preSign: missing presignedUrl/fileTicket in {pdata!r}")
 
-    async with session.put(
-        presigned_url,
-        data=video_bytes,
-        headers={"Content-Type": _content_type_for(video_name)},
-        timeout=VIDEO_UPLOAD_TIMEOUT,
-    ) as resp:
-        if resp.status >= 400:
-            body = (await resp.text())[:500]
-            raise RuntimeError(f"video presigned PUT failed status={resp.status} body={body!r}")
+    await HTTPClient(session=session).request("PUT", presigned_url, data=video_bytes,
+                                              headers={"Content-Type": _content_type_for(video_name)},
+                                              timeout=VIDEO_UPLOAD_TIMEOUT)
 
     await _poll_image_status(session, file_ticket, attempts=36, interval=5)
     return file_ticket
@@ -282,16 +279,29 @@ def _interpret_publish_response(data: dict) -> BinanceResult:
         logger.warning("binance content/add returned 504 — treating as success without post id")
         return BinanceResult(ok=True, raw=data)
     http = data.get("_http_status")
-    kind = classify_code(code) if code else ("transient" if (http and http >= 500) else "transient")
+    if code:
+        kind = classify_code(code)
+    elif http in (401, 403):
+        kind = "auth"
+    elif http == 429:
+        kind = "quota"
+    elif http and 400 <= http < 500:
+        kind = "permanent"
+    elif http and http >= 500:
+        kind = "transient"
+    else:
+        kind = "uncertain"
     return BinanceResult(
         ok=False,
-        error=describe_error_code(code, data.get("message")),
+        error=describe_error_code(code) if code else f"HTTP {http}: no confirmed publish result",
         kind=kind,
         raw=data,
     )
 
 
 async def _publish(body: dict, *, images_attached: int = 0) -> BinanceResult:
+    if not publishing_enabled():
+        return BinanceResult(ok=False, error="AUTO_PUBLISH=false", kind="dry_run")
     if not BINANCE_API_KEY:
         return BinanceResult(ok=False, error="BINANCE_SQUARE_API_KEY not set", kind="auth")
     try:
@@ -301,11 +311,13 @@ async def _publish(body: dict, *, images_attached: int = 0) -> BinanceResult:
             if result.ok:
                 result.images_attached = images_attached
             return result
-    except asyncio.TimeoutError as e:
-        return BinanceResult(ok=False, error=f"timeout: {e}", kind="transient")
+    except HTTPFailure as e:
+        return BinanceResult(ok=False, error=str(e), kind="uncertain" if e.transport else "transient")
+    except asyncio.TimeoutError:
+        return BinanceResult(ok=False, error="publish timeout: remote outcome unknown", kind="uncertain")
     except Exception as e:
-        logger.error("binance publish error: %s", e)
-        return BinanceResult(ok=False, error=str(e), kind="transient")
+        logger.error("binance publish error: %s", type(e).__name__)
+        return BinanceResult(ok=False, error=type(e).__name__, kind="uncertain")
 
 
 async def publish_text(text: str) -> BinanceResult:
@@ -326,6 +338,10 @@ async def publish_image_post(
     планировщик подержал/переретраил пост С картинкой. Старое поведение
     (fallback на текст) — за флагом BINANCE_IMAGE_FALLBACK_TEXT.
     """
+    if not publishing_enabled():
+        return BinanceResult(ok=False, error="AUTO_PUBLISH=false", kind="dry_run")
+    if len(image_bytes_list) > 4:
+        return BinanceResult(ok=False, error="image count exceeds four", kind="permanent")
     if not BINANCE_API_KEY:
         return BinanceResult(ok=False, error="BINANCE_SQUARE_API_KEY not set", kind="auth")
     wanted = image_bytes_list[:4]
@@ -352,7 +368,7 @@ async def publish_image_post(
         fail_msgs.append(str(e))
         logger.error("binance upload session error: %s", e)
 
-    if not image_urls:
+    if len(image_urls) != len(wanted) or not image_urls:
         if BINANCE_IMAGE_FALLBACK_TEXT:
             logger.warning("binance: no images uploaded, FALLBACK to text-only (flag on)")
             return await publish_text(text)
@@ -383,6 +399,8 @@ async def publish_video_post(
     (видео потеряется навсегда), возвращаем неуспех с kind для retry-политики.
     Fallback на текст — за тем же флагом BINANCE_IMAGE_FALLBACK_TEXT.
     """
+    if not publishing_enabled():
+        return BinanceResult(ok=False, error="AUTO_PUBLISH=false", kind="dry_run")
     if not BINANCE_API_KEY:
         return BinanceResult(ok=False, error="BINANCE_SQUARE_API_KEY not set", kind="auth")
     try:
@@ -442,6 +460,8 @@ async def publish_article(
     on the rendering side. Prefer `publish_image_post` (contentType=1 with
     imageList) when you need a guaranteed visible image.
     """
+    if not publishing_enabled():
+        return BinanceResult(ok=False, error="AUTO_PUBLISH=false", kind="dry_run")
     if not BINANCE_API_KEY:
         return BinanceResult(ok=False, error="BINANCE_SQUARE_API_KEY not set")
     body: dict = {"contentType": 2, "title": title, "bodyTextOnly": body_text}

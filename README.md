@@ -1,331 +1,239 @@
-# Buffer Poster Bot
+# Binance Square AI — Phase 1
 
-[![CI](https://github.com/SMOService/buffer-poster-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/SMOService/buffer-poster-bot/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![aiogram 3.30](https://img.shields.io/badge/aiogram-3.30-blueviolet)](https://docs.aiogram.dev/)
+**English** | [简体中文](README.zh-CN.md)
 
-> Self-hosted Telegram bot that turns forwarded messages into scheduled cross-posts across **Buffer** (X, LinkedIn, Threads, Bluesky, Mastodon, Facebook, Instagram, …) and **Binance Square** — with randomised scheduling so a single batch fills weeks of content. Photos, albums, **video**, inline menu, full CRUD over the queue, publication journal.
+A self-hosted Binance Square AI drafting system, incrementally adapted from
+[MIT-licensed buffer-poster-bot](https://github.com/SMOService/buffer-poster-bot).
+The sole code baseline is upstream commit `acc720e9aae7748a029400202626eab26dc8c005`.
+No other legacy projects were integrated. The original MIT license and SMOService copyright notice remain intact; see [LICENSE](LICENSE).
 
-[Русская версия](README.ru.md)
+**Drafts only by default: `AUTO_PUBLISH=false`. Docker Compose also forces this setting to false.**
+Phase 1 has not been deployed to production or tested with real provider credentials or real Binance Square posts.
+The documentation is bilingual; the AI writer and review dashboard currently produce Chinese content.
 
----
+## Audit and retained capabilities
 
-## What's new in v3.0
+The project retains SQLite, the post queue, scheduling, exponential backoff, deduplication,
+publication history, Docker, and the original official Binance Square publishing client.
+The default entry point and container no longer depend on Telegram, Buffer, imgbb, catbox, or 0x0.st.
+Legacy source files are temporarily retained, but `bot.py` is disabled and aiogram is absent from runtime dependencies.
 
-- 🎬 **Video posts on Binance Square** — forward a video (standalone or inside an album) and it publishes as a native Square video post (`contentType=3`) through the official flow: `POST /video/preSign {fileName, size} → PUT → imageStatus polling → content/add {fileTicket, cover, videoTimeSeconds}` (verified against `post-video.mjs` from binance-skills-hub). Cover is taken from the Telegram thumbnail. Videos over the Bot API's 20 MB `getFile` limit are detected up front with a clear warning instead of a doomed retry loop.
-- 🧨 **Dead-letter state machine** — permanent Binance rejects (sensitive words, length limits) and posts that exhaust their attempts stop retrying and go to `⛔ dead` (editing the text revives them). Kills the failure mode where one rejected post retried every 60s forever and burned the daily upload quota.
-- ⏳ **Exponential backoff + quota-hold** — transient errors back off 5min → ×2 → 6h cap; daily-limit errors pause publishing until 00:00 UTC with all media preserved.
-- 🖼🎬 **No media loss** — if an upload fails, the post is *not* silently degraded to text-only; it stays queued and retries with its media (old behaviour behind `BINANCE_IMAGE_FALLBACK_TEXT=1`).
-- 🔄 **Buffer new GraphQL API** — migrated to root `channels(input)` / `posts(input)` queries; auth problems now produce an actionable error instead of a silent failure.
-- 🧹 **Published-post TTL** — the queue table cleans itself after `BINANCE_PUBLISHED_TTL_DAYS` (default 30).
-- ✅ **Test suite in CI** — pytest over schema migrations, the video queue, TTL cleanup, dedup, and retry state transitions.
-
-See [`CHANGELOG.md`](CHANGELOG.md) for the full history.
-
----
-
-## What it does
-
-Forward a Telegram post into the bot — it picks a random `dueAt` in the configured window (default 1–240 hours / up to 10 days) and schedules the post on every enabled Buffer channel + Binance Square. Drop 50 posts at once → you have ~10 days of content auto-pacing itself across all your socials.
-
-```mermaid
-flowchart LR
-    A[You forward a post<br/>in Telegram] --> B{Album?}
-    B -- yes, 1.5s buffer --> C[Upload photos<br/>imgbb → catbox → 0x0]
-    B -- no --> C
-    C --> D[Generate random dueAt<br/>1–240h from now]
-    D --> E[Buffer GraphQL<br/>createPost]
-    D --> F[Binance queue<br/>SQLite + Telegram file_ids]
-    E --> G[X / LinkedIn / Threads<br/>Bluesky / Mastodon / FB / IG / ...]
-    F --> H[Background scheduler<br/>tick every 60s]
-    H --> I[Binance Square v2<br/>presignedUrl → PUT → imageStatus → content/add<br/>images: imageList · video: fileTicket]
-    I --> J[DM you the post URL]
-```
-
-### Example session
-
-```
-You ▸ [forward post: "GM ☀️ shipping a new feature today"]
-
-Bot ▸ Buffer ⏰ 23 May 2026 14:30 UTC
-        ✅ 🐦 @yourhandle
-        ✅ 💼 LinkedIn — Your Company
-        ✅ 🧵 Threads
-        ✅ 🦋 Bluesky
-
-      Binance Square ⏰ 23 May 2026 14:30 UTC
-        📥 queued #42 (1 photo)
-
-      ────────
-      🖼 photo: 1
-      "GM ☀️ shipping a new feature today"
-
-
-You ▸ /menu
-
-Bot ▸ 👋 Buffer Poster Bot
-
-      Active Buffer channels (4):
-        🐦 @yourhandle
-        💼 LinkedIn — Your Company
-        🧵 Threads
-        🦋 Bluesky
-
-      Binance Square: ✅ active
-        in queue: 12 posts
-        next: 24 May 2026 09:15 UTC
-
-      Schedule: random 1–240 h
-      📊 history: 47 ✅ / 2 ❌ (total 49)
-
-      [📡 Channels] [📋 Queue]
-      [🪙 Binance Square] [📊 Logs]
-      [⚙️ Settings] [🔁 Refresh]
-```
-
-### Features
-
-- **Random scheduling** — every forwarded post gets a randomised `dueAt`. Configurable via `SCHEDULE_MIN_HOURS` / `SCHEDULE_MAX_HOURS`.
-- **Album / carousel support** — up to 4 photos grouped into one Buffer post and one Binance Square image post.
-- **Video posts** — a forwarded video (≤20 MB, the Bot API `getFile` limit) publishes as a native Binance Square video post; Buffer still gets the text + photos.
-- **Duplicate guard** — MD5 hash of the post body, blocks re-posting the same text twice.
-- **Inline menu + CRUD** — main menu, channel toggles, queue management (edit / delete / reschedule / send now).
-- **Publication journal** — `/logs` with success + failure history, paginated, filterable.
-- **Binance Square v2 media flow** — official implementation per [binance/binance-skills-hub](https://github.com/binance/binance-skills-hub) (image upload, polling status, error code recognition for `220003/220004/220009/220014/20002/20013/20022`).
-- **Image hosting fallback chain** for Buffer — imgbb (primary) → catbox → 0x0.st.
-- **Single-user lock** — `ALLOWED_USER_ID` ensures only you can use your instance.
-- **Pause / resume** the Binance scheduler at any time + **batch flush** to publish everything in the queue immediately.
-- **Zero infra** — SQLite on a mounted volume; deploys as a single worker process.
-
----
-
-## Quick start
-
-### 1. Get the tokens
-
-| Variable | Where to find it |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | [@BotFather](https://t.me/BotFather) → `/newbot` |
-| `ALLOWED_USER_ID`    | [@userinfobot](https://t.me/userinfobot) — your numeric Telegram ID |
-| `BUFFER_ACCESS_TOKEN`| [publish.buffer.com/settings/api](https://publish.buffer.com/settings/api) → API (Beta) |
-| `IMGBB_API_KEY`      | [api.imgbb.com](https://api.imgbb.com/) — free, recommended for reliable image hosting on Buffer |
-| `BINANCE_SQUARE_API_KEY` | [Binance Skills Hub → square-post → Creator Center](https://www.binance.com/en/skills/detail/binance/square-post) (optional) |
-
-### 2. Run with Docker
-
-```bash
-git clone https://github.com/SMOService/buffer-poster-bot.git
-cd buffer-poster-bot
-cp .env.example .env
-# fill in .env
-docker compose up -d
-```
-
-### 3. Or run locally
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-export TELEGRAM_BOT_TOKEN=...
-export ALLOWED_USER_ID=...
-export BUFFER_ACCESS_TOKEN=...
-python bot.py
-```
-
-### 4. Or one-click on Railway
-
-1. Fork this repo on GitHub.
-2. Railway → **New Project** → **Deploy from GitHub** → pick your fork.
-3. **Variables** tab → fill the env vars above + `SCHEDULE_MIN_HOURS=1`, `SCHEDULE_MAX_HOURS=240`.
-4. **Volume** (required, else data wipes on redeploy):
-   - Right-click on canvas → **Volume** → service: `worker`, mount path: `/app/data`.
-5. Railway auto-detects `Procfile` and starts the bot as a worker.
-
----
-
-## Commands
-
-| Command | What it does |
-|---|---|
-| `/start` or `/menu` | Main menu with inline buttons |
-| `/channels` | Toggle Buffer channels on/off; *Refresh from Buffer* to re-sync |
-| `/queue`    | Scheduled-post counts per Buffer channel + Binance summary |
-| `/binance`  | Binance Square queue with full CRUD on each post |
-| `/logs`     | Paginated journal of publish attempts (success + failures) |
-
-**To post:** just forward (or send) a message to the bot. Supported: text, photo, photo + caption, album of up to 4 photos, video up to 20 MB (video goes to Binance Square; Buffer receives the text + photos).
-
----
-
-## How scheduling works
-
-**Buffer.** On each forward the bot generates a random `dueAt` in the `[SCHEDULE_MIN_HOURS, SCHEDULE_MAX_HOURS]` window from *now* (default 1–240 h). The post is created via Buffer GraphQL with `mode: customScheduled` — Buffer publishes it at the scheduled time.
-
-**Binance Square.** Posts are stored in a SQLite queue on the mounted volume **along with Telegram `file_id`s** for any attached photos. The background scheduler ticks every 60 s, finds posts whose `publish_at` has elapsed, downloads fresh bytes from Telegram, runs them through the official Binance v2 media flow, and DMs you with a link to the published post.
-
-**Duplicate protection.** Before scheduling, the bot computes `md5(text.strip().lower())` and checks the `published_hashes` table. Repeat? Hard block + warning to user.
-
-**Albums.** Telegram delivers album items as separate messages with the same `media_group_id`. The bot buffers them for 1.5 s, then ships them all in one Buffer post + one Binance Square image post (up to 4 images for X carousel compatibility).
-
-**Pause / batch.** Need to freeze posting before a launch? Tap `⏸ Pause` on the Binance screen. Want to flush the queue immediately (e.g. for a coordinated drop)? `⚡ Publish all now` with a confirm.
-
----
-
-## Binance Square v2 media flow
-
-Implementation follows [binance/binance-skills-hub](https://github.com/binance/binance-skills-hub) (`post-image.mjs`, `post-video.mjs`, `lib.mjs`). There is no separate OpenAPI doc on `developers.binance.com` — the skill source is the canonical reference.
-
-| Step | URL | Body |
-|---|---|---|
-| 1. Presign | images: `POST /v2/…/image/presignedUrl` · video: `POST /v2/…/video/preSign` | images: `{"imageName":"<name>.<ext>"}` · video: `{"fileName", "size"}` → `data.presignedUrl`, `data.fileTicket` |
-| 2. Upload | `PUT <presignedUrl>` | raw bytes, `Content-Type: image/<ext>` or `video/<ext>` |
-| 3. Status | `POST /bapi/composite/v2/public/pgc/openApi/image/imageStatus` | `{"fileTicket":...}` polling: images 3s × 10, video 5s × 36 → `status==1` |
-| 4. Publish | `POST /bapi/composite/v1/public/pgc/openApi/content/add` | image post: `{"contentType":1, "bodyTextOnly", "imageList":[imageUrl, …]}` (up to 4) · video post: `{"contentType":3, "fileTicket", "cover", "videoTimeSeconds", "isPublish":true}` (+ `bodyTextOnly` only when text is non-empty) |
-
-All JSON requests carry `X-Square-OpenAPI-Key`, `Content-Type: application/json`, **`clienttype: binanceSkill`**.
-
-Quirks handled by `services/binance.py`:
-- HTTP 504 on `/content/add` is treated as success without a `post_id` (per official helper).
-- Known error codes (`220003/4/9/14`, `20002/13/22`, `220095`) are mapped to human-readable journal entries and classified (`permanent`/`auth`/`quota`/`transient`) for the retry policy.
-- Daily limits: **100 posts/day**, **400 uploads/day** — exceeded → quota-hold until 00:00 UTC, media preserved.
-- **Images** go into `content/add` as processed `imageUrl`s; **video** goes as its `fileTicket` — different reference, same upload pipeline.
-
-Article-mode (`contentType=2` with a cover image) is implemented in the SDK layer (`publish_article`) but not surfaced in the UI yet — see "Roadmap" below.
-
----
+See the [Phase 1 audit and change inventory](docs/PHASE1_AUDIT.md) for the original file responsibilities,
+retention/removal decisions, and fixes. [UPSTREAM](docs/UPSTREAM.md) records provenance and official API references.
+The original English upstream README is preserved at `docs/UPSTREAM_README.md`; it is historical documentation, not the current setup guide.
+The audit and detailed validation report are currently written in Chinese.
 
 ## Architecture
 
-```
-buffer-poster-bot/
-├── bot.py              # entry point: init_db, load channels, start scheduler, polling
-├── bot_instance.py     # aiogram Bot/Dispatcher singletons + download_telegram_file
-├── config.py           # env + constants (BUFFER_API, BINANCE_API_V1/V2, …)
-├── db.py               # sqlite + migrations via PRAGMA user_version (schema v5)
-├── keyboards.py        # every InlineKeyboardMarkup builder
-├── scheduler.py        # background Binance publisher (60s tick, pause-aware)
-├── state.py            # FSM states (EditBinance.waiting_text)
-├── services/
-│   ├── buffer.py       # Buffer GraphQL: fetch_channels, create_post, count_scheduled_posts
-│   ├── binance.py      # v1 text + v2 media flow (presignedUrl → PUT → imageStatus → content/add)
-│   └── uploader.py     # imgbb (primary) / catbox / 0x0.st fallback chain for Buffer
-├── handlers/
-│   ├── menu.py         # /start, /menu, home / settings callbacks
-│   ├── channels.py     # /channels + toggle + refresh
-│   ├── queue.py        # /queue summary
-│   ├── binance.py      # /binance + CRUD + pause/resume + flush
-│   ├── logs.py         # /logs + pagination + filter
-│   ├── post.py         # handle_post (forward → Buffer + Binance queue; text/photo/album/video)
-│   └── common.py       # is_me, fmt_ts, fmt_delta, preview, random_due_at
-├── tests/              # pytest: migrations, video queue, TTL, dedup, retry states
-├── Procfile            # Railway worker entrypoint
-├── Dockerfile          # docker / docker-compose / Coolify / any VPS
-├── docker-compose.yml  # ready-to-go with volume mount
-├── .env.example        # all env vars documented
-├── pyproject.toml      # ruff config
-└── .github/
-    ├── workflows/ci.yml          # ruff + py_compile + import smoke + Docker build
-    ├── ISSUE_TEMPLATE/           # bug / feature templates
-    └── PULL_REQUEST_TEMPLATE.md
+```text
+src/
+  collectors/
+    binance_market/        Binance Spot exchangeInfo and 24hr ticker
+    crypto_news/           CoinDesk, Cointelegraph, Decrypt, The Block RSS
+    binance_futures/        Extension boundary; not implemented in Phase 1
+    binance_announcement/   Extension boundary; not implemented in Phase 1
+  engine/
+    event_engine.py         Unified events, filtering and persistence
+    scoring.py              Deterministic initial scoring
+    deduplicator.py         Cross-source headlines and hourly market snapshots
+    rules.py                Score, age and future-timestamp checks
+  ai/
+    provider.py             AIProvider protocol; Gemini -> Groq fallback
+    gemini.py / groq.py      REST adapters with environment-supplied keys
+    classifier.py           Deterministic classification; no extra AI requests
+    writer.py               Chinese prose, length/opening checks, verified facts
+  publisher/
+    binance_square/         Adapter for services/binance.py and local images
+    retry.py                Exponential backoff and UTC quota reset
+  storage.py                Events, atomic enqueue/dedup, opening history, AI budget
+  pipeline.py               Collect -> events -> writer -> SQLite draft queue
+  scheduler.py              Independent scheduler with dry-run gates
+  app.py                    Read-only dashboard, APIs, health and background workers
+  cli.py                    Local text/image draft enqueue and one-shot collection
+  http.py / settings.py     Shared timeout/retry policy and configuration
+db.py                       Existing database, incrementally migrated to schema v6
+services/binance.py          Preserved official v1/v2 publishing flow
+prompts/writer.txt           Editable writing prompt
 ```
 
-### Database (SQLite, on `/app/data/bot.db`, schema v5)
-
-| Table | Purpose |
-|---|---|
-| `channels` | Buffer channel cache: `id`, `name`, `service`, `enabled` |
-| `binance_queue` | Pending posts: `text`, `image_urls` (JSON, imgbb), `image_file_ids` (JSON, Telegram), `video_file_id` / `video_cover_file_id` / `video_duration`, `content_type`, `title`, `publish_at`, `status` (`pending`/`published`/`dead`), `next_attempt_at`, `last_error`, `attempt_count` |
-| `published_hashes` | MD5 of every successfully scheduled post body (dedup guard) |
-| `post_history` | Journal: `kind` (buffer/binance), `service`, `status`, `text_preview`, `ext_id`, `ext_url`, `error` (rotates by `HISTORY_LIMIT`) |
-| `kv` | Key-value store for scheduler state (`binance_paused` etc.) |
-
-Migrations run incrementally on startup via `PRAGMA user_version` — upgrading from v1.x preserves your data.
-
----
-
-## Configuration reference
-
-See [`.env.example`](.env.example) for the full annotated list. Required:
-
-```env
-TELEGRAM_BOT_TOKEN=123456789:AA...
-ALLOWED_USER_ID=123456789
-BUFFER_ACCESS_TOKEN=1/abc...
+```mermaid
+flowchart LR
+    RSS[Free RSS feeds] --> E[Event Engine / Rules / Scoring]
+    Market[Binance 24h market data] --> E
+    E --> D[SQLite event deduplication]
+    D --> AI[Gemini -> Groq]
+    AI --> W[Chinese writer / factual values / asset tags]
+    W --> Q[SQLite post queue]
+    Q --> UI[Read-only dashboard / history]
+    Q --> S[Scheduler / Retry]
+    S --> Gate{AUTO_PUBLISH}
+    Gate -->|false by default| Hold[Retain draft; do not call Binance]
+    Gate -->|explicit future opt-in| Pub[Official Binance Square client]
 ```
 
-Optional:
+News collectors return `{id, source, title, summary, url, published_at, symbols}`.
+HTML is stripped, tracking parameters are removed, and timestamps are normalized to UTC.
+Items without reliable publication dates are skipped instead of being assigned the current time.
+One unavailable feed does not stop the remaining feeds; failures are recorded in collection history.
 
-```env
-IMGBB_API_KEY=...                # recommended — primary image host for Buffer
-BINANCE_SQUARE_API_KEY=...       # enables Binance Square publishing
-BINANCE_USE_IMAGES=1             # 1 = upload media to Binance v2, 0 = text-only Binance posts
-BINANCE_IMAGE_FALLBACK_TEXT=0    # 1 = publish text-only when a media upload fails (media is lost)
-BINANCE_MAX_ATTEMPTS=6           # attempts before a post goes to dead-letter
-BINANCE_BACKOFF_BASE_SEC=300     # retry backoff: base 5 min
-BINANCE_BACKOFF_MAX_SEC=21600    # retry backoff: cap 6 h
-BINANCE_PUBLISHED_TTL_DAYS=30    # clean published posts from the queue table after N days (0 = keep)
-SCHEDULE_MIN_HOURS=1             # default 1 (one hour)
-SCHEDULE_MAX_HOURS=240           # default 240 (ten days)
-HISTORY_LIMIT=500                # post_history rotation size
-ECOSYSTEM_LINKS_ENABLED=1        # 0 = hide the "🚀 More tools" menu section
-SUNSET_NOTICE=                   # optional banner text shown in /start
-DB_PATH=/app/data/bot.db         # override only for local dev
+Market snapshots contain `symbol, base_asset, quote_asset, last_price, change_24h, volume_24h,
+quote_volume_24h, high_24h, low_24h, timestamp, source`.
+Numeric values remain decimal strings. `change_24h` is a percentage; `volume_24h` is base-asset volume,
+and `quote_volume_24h` is quote-asset volume. Asset tags use Binance exchangeInfo's `baseAsset`, such as `$BTC`, rather than `$BTCUSDT`.
+
+Events use `{type, symbol, score, timestamp, data, source}`.
+Initial scoring is an explainable heuristic with a configurable threshold: news receives points for summaries and recognized assets;
+market events receive points for absolute 24h price changes. It is not a prediction model.
+Headlines are normalized for cross-source deduplication; market snapshots are limited to one event per asset per UTC hour.
+The original MD5 text deduplication remains in place.
+
+## Run locally
+
+Use Python 3.12+ and run these commands from the project root:
+
+```bash
+python -m venv .venv
+# Linux / macOS
+source .venv/bin/activate
+# Windows PowerShell
+# .venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+cp .env.example .env
+python -m src.app
 ```
 
----
+On Windows, use `Copy-Item .env.example .env` instead of `cp` if preferred.
+The app loads `.env` from the project root; existing environment variables take precedence.
+It can start, collect data, and show events without any API keys. AI drafts require at least one configured model provider.
+Gemini is the primary provider; Groq is optional fallback. Model IDs are configurable.
+**Provider availability and free allowances depend on your account. The project does not assume a guaranteed monthly $10 credit.**
 
-## Adding a new social network
+Open the dashboard at <http://127.0.0.1:8080/>.
+Collection runs every 15 minutes by default, and the scheduler checks the queue every 60 seconds.
+The dashboard is read-only: it shows complete drafts, event scores/states, and preparation/publication history. It has no publish button.
+Set `COLLECT_ENABLED=false` to disable collection during a local review.
 
-1. Connect the channel in Buffer: **Settings → Channels → Connect Channel**.
-2. In the bot: `/channels` → tap **🔄 Refresh from Buffer**.
-3. The new channel appears in the list — tap it to enable.
+## Docker Compose
 
-Anything Buffer supports (currently 9+ networks) just works. No code changes needed.
+Requires Docker Engine and Docker Compose v2.24+ for optional `env_file` support.
 
----
+```bash
+cp .env.example .env
+# Edit .env; API keys may remain empty for an initial review.
+docker compose config --quiet
+docker compose up --build -d
+docker compose ps
+docker compose logs --tail=100
+```
 
-## Roadmap
+Compose exposes port 8080 only on the host's `127.0.0.1` and stores SQLite/media in `bot-data:/app/data`.
+It forces `AUTO_PUBLISH=false` even if `.env` contains true.
+The container runs as a non-root user and uses `/health` for health checks. Run one worker per SQLite database.
+The original local verification environment lacked Docker CLI/Engine: YAML checks and a local simulation of the container's COPY layout passed,
+but an actual container launch was not performed there. CI includes Compose build/start/health checks; see workflow results for their status.
 
-- 📰 **Article publishing UI** — surface `contentType=2` (long-form with cover image) in the forward flow. The SDK helper `publish_article(title, body, cover)` exists; needs a `/article` command or a forward-prompt.
-- 🪝 **Webhook mode** — currently polling-only; webhook mode would simplify zero-downtime deploys.
-- 📹 **Large video support** — the 20 MB ceiling comes from Bot API `getFile`; a local Bot API server raises it to 2 GB for self-hosters who need it.
+Before future access through a domain, configure a random `ADMIN_TOKEN`, retain the loopback port mapping, and use TLS in the reverse proxy.
+Browser Basic Auth uses username `admin` and the token as its password. APIs also accept `Authorization: Bearer ...`.
+Tokens are not accepted in URL query parameters, and dashboard content is HTML-escaped.
+A standalone bind to a non-loopback address requires `ADMIN_TOKEN`, unless `ALLOW_UNAUTHENTICATED_ADMIN=true` is explicitly set for an isolated local environment.
+Compose sets this option within its loopback-only host-port mapping.
 
----
+## Read-only APIs and health
 
-## Ecosystem — hosted alternatives
+| Endpoint | Response |
+| --- | --- |
+| `GET /health` | Database/worker state, dry-run state, AI configuration; 503 for service faults |
+| `GET /api/queue?limit=100&offset=0` | Draft/published rows, states, media and errors |
+| `GET /api/events` | Structured events and generation attempts/states |
+| `GET /api/logs` | Draft preparation, collection/writing failures and publication history |
 
-Don't want to self-host? The same team runs ready-to-use hosted bots for channel owners and content makers:
+APIs use limit/offset pagination, with a maximum limit of 200.
+Health does not require authentication; other routes are protected when `ADMIN_TOKEN` is set.
+Service health does not guarantee that external RSS/API sources are available; inspect worker results and collection history for source failures.
 
-| Bot | What it does |
-|---|---|
-| [@SuperappAIbot](https://t.me/SuperappAIbot?start=ref_github) | Channel management suite: cross-posting, AI composer, competitor analytics («Radar») |
-| [@BridgePostBot](https://t.me/BridgePostBot?start=ref_github) | Auto-bridge posts from Telegram to external platforms with AI rewriting |
-| [@ZavodClawbot](https://t.me/ZavodClawbot?start=ref_github) | AI content factory — generates niche posts on schedule |
-| [@TonChatAIbot](https://t.me/TonChatAIbot?start=ref_github) | AI assistant for texts, ideas and reviews |
-| [@SaveAsVideoFreebot](https://t.me/SaveAsVideoFreebot?start=ref_github) | Download videos from social networks for reposting |
-| [@StarsCashFlowbot](https://t.me/StarsCashFlowbot?start=ref_github) | Monetize your audience with Telegram Stars |
+## Enqueue local text/image drafts without sending
 
-Open-source neighbours in the **SMOService** org:
+```bash
+python -m src.cli enqueue --text '待审阅的中文草稿 $BTC'
+```
 
-- **[Cross-Post-Bridge-AI-bot](https://github.com/SMOService/Cross-Post-Bridge-AI-bot)** — bridges between your Telegram channels with AI rewriting, translation, and cross-posting.
+Place images in `data/media/` and use paths relative to that directory:
 
----
+```bash
+python -m src.cli enqueue --text '图文草稿 $ETH' --image chart.png
+python -m src.cli enqueue --text '定时草稿 $BTC' --publish-at 2026-10-08T09:00:00+08:00
+python -m src.cli collect-once
+```
 
-## Contributing
+Posts support up to four images, each up to 10 MB. Supported extensions: jpg, jpeg, png, gif, webp.
+Image paths cannot escape `MEDIA_ROOT`.
+With Compose, use `docker compose exec square-ai python -m src.cli ...`; image files must be present in the container's persistent volume.
+Phase 1's AI writer generates text only; it does not generate or download illustrations automatically.
+Local image enqueue and official image publishing remain supported.
+Legacy Telegram file IDs and URL-only hosted media require manual migration and are never silently dropped into text-only posts.
 
-PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Bug reports via the [issue templates](https://github.com/SMOService/buffer-poster-bot/issues/new/choose). Security disclosures: [SECURITY.md](SECURITY.md).
+## Writer constraints and publication gates
 
----
+- Models generate JSON containing Chinese `opening` and `commentary`. The style prompt is configurable, but cannot cancel core factual constraints.
+- Code appends numeric values, market facts and source timestamps from structured input. Model prose containing numbers, market quantity claims or fabricated asset tags is rejected.
+- News posts retain the source headline and original link, visibly attributed and marked for verification; they do not infer live prices from news.
+- Correct `$BTC`, `$ETH` and other recognized tags are added automatically. News without recognized assets is not given an arbitrary BTC tag.
+- The last 30 openings are persisted in SQLite. Similar or fixed-template openings trigger regeneration, at most twice; invalid results are not queued.
+- `WRITER_MAX_CHARS` applies to the whole post, including facts, source and tags. Drafts that cannot fit the verified content are rejected instead of truncating essential facts.
+- Free-form commentary still needs human review. Phase 1 does not claim exhaustive semantic fact-checking.
 
-## License
+`AUTO_PUBLISH=false` is checked in the scheduler, publisher adapter and underlying Binance client.
+Dry-run does not claim posts, upload media or call `content/add`; drafts are not falsely marked as published.
+Collector/model requests have timeouts and bounded retries, exponential backoff and Retry-After handling.
+Application logs do not include model request bodies, credentials or raw provider responses.
+Configured keys and signed query strings are redacted from log/error fields.
 
-[MIT](LICENSE) © 2026 SMOService
+The preserved official flow is v2 presigned URL -> PUT -> imageStatus -> v1 content/add.
+Partial image-upload failures retain all media and defer the post. Permanent failures or exhausted retries enter `dead`;
+authentication failures hold the queue for one hour, and quota failures hold it until UTC midnight.
+Non-idempotent `content/add` is not immediately retried by HTTP transport: definite failures use the durable queue,
+while timeouts, interruptions and unconfirmed outcomes enter `review`.
+Review rows are not automatically sent and require a future manual check against Binance.
+HTTP 504 retains the official convention of success without a post ID. Interrupted publishing also recovers into review instead of automatic resend.
 
-## Acknowledgements
+## Configuration
 
-- [aiogram 3.x](https://docs.aiogram.dev/) — Telegram Bot framework
-- [aiohttp](https://docs.aiohttp.org/) — async HTTP client
-- [Buffer GraphQL API](https://developers.buffer.com) — the scheduling backbone
-- [Binance Skills Hub: square-post](https://github.com/binance/binance-skills-hub) — official reference for Binance Square OpenAPI
-- imgbb, catbox.moe, 0x0.st — free image hosts that make Buffer's URL-only assets workable
+See [.env.example](.env.example) for all settings.
+
+| Setting | Default / meaning |
+| --- | --- |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | Empty key; primary model `gemini-flash-latest` |
+| `GROQ_API_KEY`, `GROQ_MODEL` | Empty key; fallback `llama-3.3-70b-versatile` |
+| `BINANCE_SQUARE_API_KEY` | Empty; unnecessary for dry-run |
+| `AUTO_PUBLISH` | false; Compose locks it to false |
+| `DATABASE_URL` | `sqlite:///data/bot.db`; persistent SQLite only; legacy DB_PATH is fallback |
+| `WRITER_PROMPT_PATH`, `WRITER_MAX_CHARS` | `prompts/writer.txt`; 650, configurable from 180 to 2000 |
+| `MARKET_SYMBOLS` | BTCUSDT,ETHUSDT; up to 20 valid trading pairs |
+| `EVENT_MIN_SCORE`, `EVENT_MAX_AGE_SEC` | 40; 86400 seconds |
+| `MAX_DRAFTS_PER_CYCLE`, `MAX_DRAFTS_PER_DAY` | 3; 10 per UTC day |
+| `MAX_AI_REQUESTS_PER_DAY` | 40; persistent shared model HTTP budget, including retries and fallback |
+| `EVENT_MAX_ATTEMPTS` | 3; failed generation uses 5-minute exponential backoff |
+| `HTTP_TIMEOUT_SEC`, `HTTP_MAX_ATTEMPTS` | 30 seconds; 3 attempts; Binance media keeps operation-specific timeouts |
+| `BINANCE_MAX_ATTEMPTS` | 6 publication attempts; backoff from 300 to 21600 seconds |
+
+The AI budget limits request count rather than spending. Models, token lengths and account allowances affect actual costs.
+Once the budget is exhausted, new model network requests stop. Counts and attempts survive restarts.
+Back up existing databases before upgrading. Migrations add fields/tables without deleting original data or channel tables.
+
+## Verification
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q
+ruff check .
+python -m compileall -q src config.py db.py services/binance.py
+```
+
+The local Phase 1 suite passed **54 tests**, Ruff and syntax checks.
+Tests use temporary SQLite databases, fixture models and local mock HTTP servers; they require no real credentials and do not publish to Binance.
+Coverage includes migrations, concurrent claims/dedup transactions, budgets, fallback, RSS/market data, writer constraints, dry-run,
+the official text/image request contract, media preservation, retries, quota/auth holds, dead/review states, dashboard/health/auth and restart persistence.
+See the [detailed validation record](docs/VALIDATION.md) for actual checks and limitations.
+
+Phase 1 does not implement futures/announcement collection, automatic illustrations, production deployment,
+a complete operations dashboard, or integration tests with real model/Binance accounts.

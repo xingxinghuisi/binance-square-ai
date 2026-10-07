@@ -6,12 +6,22 @@ import sqlite3
 from datetime import datetime, timezone
 
 from config import BINANCE_MAX_ATTEMPTS, DB_PATH, HISTORY_LIMIT
+from src.logging_config import redact
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+
+
+class _Connection(sqlite3.Connection):
+    def __exit__(self, *args):
+        try:
+            return super().__exit__(*args)
+        finally:
+            self.close()
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, timeout=5, factory=_Connection)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -26,6 +36,10 @@ def _set_user_version(conn, v: int):
 
 def init_db():
     with get_conn() as conn:
+        v = _user_version(conn)
+        if v > SCHEMA_VERSION:
+            raise RuntimeError("database schema is newer than this application")
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("""CREATE TABLE IF NOT EXISTS channels (
             id TEXT PRIMARY KEY, name TEXT, service TEXT, enabled INTEGER DEFAULT 1
         )""")
@@ -43,7 +57,6 @@ def init_db():
         )""")
         conn.commit()
 
-        v = _user_version(conn)
         if v < 1:
             for _col, ddl in [
                 ("image_urls", "ALTER TABLE binance_queue ADD COLUMN image_urls TEXT"),
@@ -123,9 +136,25 @@ def init_db():
             conn.commit()
             _set_user_version(conn, 5)
 
-        # crash-recovery: посты, застрявшие в transient-статусе 'publishing'
-        # (процесс умер посреди публикации) — вернуть в pending
-        conn.execute("UPDATE binance_queue SET status='pending' WHERE status='publishing'")
+        # Crash recovery holds uncertain remote outcomes instead of resending.
+        if v < 6:
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(binance_queue)")}
+            for name, ddl in (("image_paths", "ALTER TABLE binance_queue ADD COLUMN image_paths TEXT DEFAULT '[]'"),
+                              ("event_id", "ALTER TABLE binance_queue ADD COLUMN event_id TEXT")):
+                if name not in columns:
+                    conn.execute(ddl)
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_queue_event ON binance_queue(event_id)")
+            conn.execute("""CREATE TABLE IF NOT EXISTS ai_events (
+                id TEXT PRIMARY KEY, fingerprint TEXT UNIQUE NOT NULL, payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'new', attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at INTEGER DEFAULT 0, error TEXT, opening TEXT,
+                created_at INTEGER DEFAULT (strftime('%s','now'))
+            )""")
+            _set_user_version(conn, 6)
+        # An interrupted content/add may have reached Binance. Do not resend blindly.
+        conn.execute("UPDATE binance_queue SET status='review', last_error='interrupted publish: verify remotely' "
+                     "WHERE status='publishing'")
+        conn.execute("UPDATE ai_events SET status='new' WHERE status='writing'")
         conn.commit()
 
 
@@ -381,7 +410,7 @@ def mark_binance_dead(post_id: int, error: str):
         conn.execute(
             "UPDATE binance_queue SET status='dead', last_error=?, "
             "attempt_count=COALESCE(attempt_count,0)+1 WHERE id=?",
-            (error[:500], post_id),
+            (redact(error)[:500], post_id),
         )
         conn.commit()
 
@@ -392,7 +421,7 @@ def mark_binance_retry(post_id: int, error: str, next_attempt_at: int):
         conn.execute(
             "UPDATE binance_queue SET status='pending', last_error=?, next_attempt_at=?, "
             "attempt_count=COALESCE(attempt_count,0)+1 WHERE id=? AND status!='published'",
-            (error[:500], next_attempt_at, post_id),
+            (redact(error)[:500], next_attempt_at, post_id),
         )
         conn.commit()
 
@@ -499,7 +528,7 @@ def get_binance_queue_stats() -> dict:
             "SELECT publish_at FROM binance_queue WHERE status='pending' ORDER BY publish_at LIMIT 1"
         ).fetchone()
         published_24h = conn.execute(
-            "SELECT COUNT(*) as c FROM binance_queue WHERE status='published' AND created_at>=?",
+            "SELECT COUNT(*) as c FROM binance_queue WHERE status='published' AND COALESCE(published_at,created_at)>=?",
             (now - 86400,),
         ).fetchone()["c"]
     return {
@@ -533,10 +562,10 @@ def log_history(
                 service,
                 channel_name,
                 status,
-                (text_preview or "")[:200],
+                redact(text_preview or "")[:200],
                 ext_id,
                 ext_url,
-                (error or "")[:500] if error else None,
+                redact(error)[:500] if error else None,
             ),
         )
         conn.execute(

@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+raise RuntimeError("Legacy Telegram/Buffer entry point is disabled. Run: python -m src.app")
+
 import asyncio
 
 from aiogram.types import BotCommand
