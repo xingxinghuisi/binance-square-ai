@@ -29,6 +29,11 @@ def publishing_enabled() -> bool:
     return os.environ.get("AUTO_PUBLISH", "false").strip().lower() in {"true", "1"}
 
 
+def enforce_dry_run():
+    # Staging entry points cannot opt in, even with malformed or overridden values.
+    os.environ["AUTO_PUBLISH"] = "false"
+
+
 @dataclass(frozen=True)
 class Settings:
     gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""), repr=False)
@@ -54,11 +59,12 @@ class Settings:
     event_max_attempts: int = field(default_factory=lambda: int(os.getenv("EVENT_MAX_ATTEMPTS", "3")))
     http_timeout: float = field(default_factory=lambda: float(os.getenv("HTTP_TIMEOUT_SEC", "30")))
     http_attempts: int = field(default_factory=lambda: int(os.getenv("HTTP_MAX_ATTEMPTS", "3")))
+    readiness_max_age: int = field(default_factory=lambda: int(os.getenv("READINESS_MAX_AGE_SEC", "3600")))
     media_root: Path = field(default_factory=lambda: Path(os.getenv("MEDIA_ROOT", "data/media")))
 
     def __post_init__(self):
         for name in ("collection_interval", "scheduler_interval", "max_event_age", "drafts_per_cycle",
-                     "drafts_per_day", "ai_requests_per_day", "event_max_attempts", "http_timeout", "http_attempts"):
+                     "drafts_per_day", "ai_requests_per_day", "event_max_attempts", "http_timeout", "http_attempts", "readiness_max_age"):
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
         if not 180 <= self.max_chars <= 2000:

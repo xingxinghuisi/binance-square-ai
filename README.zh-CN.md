@@ -1,4 +1,4 @@
-# Binance Square AI — Phase 1.5
+# Binance Square AI — Phase 1.6
 
 [English](README.md) | **简体中文**
 
@@ -8,6 +8,32 @@
 
 **默认只生成草稿：`AUTO_PUBLISH=false`。Docker Compose 强制该值为 false。**
 没有部署生产环境，没有使用真实密钥或向 Binance 发布帖子。
+
+## Phase 1.6 VPS Staging 准备
+
+完整操作见 [Staging 部署说明](docs/STAGING.md)（[英文](docs/STAGING.en.md)）：代码获取、模型/管理员配置、
+启动、真实探测、样稿评分、日志、更新与 SQLite 一致性备份。真实模型和公开数据仅用于生成草稿；
+**Square API Key 忽略且无需配置**。CLI/后台入口强制 dry run，Compose 强制 false，scheduler 硬锁仍保留。
+运行中环境误变 true 也不会让 health/后台显示已开启发布。
+
+```bash
+python -m src.cli readiness
+python -m src.cli quality-report
+python -m src.cli session-report
+# 均支持 --json，不调用网络。
+```
+
+readiness 要求 DB 和禁发锁正常、至少一个模型已配置、ADMIN_TOKEN 非空，且 Binance Spot 最近一次
+非空成功探测未超过 READINESS_MAX_AGE_SEC（默认 3600 秒）。Spot 是关键源：未探测、失败、过期则
+ready=false（退出 1）；RSS 非关键，CoinDesk 故障不单独阻止草稿生成。配置检查不替代 test-ai。
+网络诊断区分 DNS、connect/read timeout、TLS、HTTP status 和总时间超时，不暴露原始错误。
+
+quality-report 汇总全部未发布草稿：pending/good/bad、good/(good+bad)、前 10 个标准化 bad note，
+按 event_type/source/symbol/ai_provider 分组 good/bad；未评分时 good_rate=N/A（JSON null）。
+session-report 汇总滚动 24 小时 UTC 的采集结果、模型尝试（含 retry/fallback/test-ai）、AI 草稿及当前质量，
+不把手工草稿算作 AI 生成。SQLite v7 -> v8 只增加统计记录，保留队列、评分和日预算，不补造历史；
+升级后前 24 小时明确显示记录不完整。CLI 检查保留正在 writing 的 claim，后台启动仍保留崩溃恢复。
+升级前备份。CI 默认 RUN_LIVE_TESTS=false，不注入真实 Key。
 
 ## Phase 1.5 诊断与人工质量记录
 
@@ -111,7 +137,7 @@ src/
   app.py                    只读后台、API、health、后台任务
   cli.py                    本地手动图文入队 / 单次采集
   http.py / settings.py     公共 timeout/retry 和配置
-db.py                       复用上游 DB，增量迁移到 schema v7
+db.py                       复用上游 DB，增量迁移到 schema v8
 services/binance.py          复用官方 v1/v2 text/image 发布流程
 prompts/writer.txt           可编辑 Prompt
 ```
@@ -128,7 +154,7 @@ flowchart LR
     Q --> S[Scheduler / Retry]
     S --> Gate{AUTO_PUBLISH}
     Gate -->|false 默认| Hold[保留草稿，不调用 Binance]
-    Pub[原官方客户端保留；Phase 1.5 不启用]
+    Pub[原官方客户端保留；staging 不启用]
 ```
 
 新闻统一返回 `{id, source, title, summary, url, published_at, symbols}`。
@@ -173,7 +199,7 @@ Windows 可用 `Copy-Item .env.example .env`。应用自动加载项目根目录
 
 ```bash
 cp .env.example .env
-# 编辑 .env，API Key 可暂留空
+# 配置 ADMIN_TOKEN；模型 API Key 可暂留空
 docker compose config --quiet
 docker compose up --build -d
 docker compose ps
@@ -190,6 +216,7 @@ Phase 1 远程 CI 已在 `9dd457a` **实际通过 Compose build/up/health**：[�
 浏览器使用 Basic 登录：用户名 `admin`，密码为该 token；API 支持 `Authorization: Bearer ...`。
 token 不接受 URL query，后台内容做 HTML 转义。独立公开地址监听需要 ADMIN_TOKEN，
 `ALLOW_UNAUTHENTICATED_ADMIN=true` 只用于明确隔离的本地访问；Compose 已限制宿主端口。
+Compose 仅在该变量缺失时默认 true，现在尊重 .env 明确设置的 false；staging 必须配置 ADMIN_TOKEN 并设为 false。
 
 ## 只读 API 与 Health
 

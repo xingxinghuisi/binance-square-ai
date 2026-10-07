@@ -20,6 +20,7 @@ dist/
 *.db-wal
 *.db-shm
 data/
+backups/
 
 # IDE
 .vscode/

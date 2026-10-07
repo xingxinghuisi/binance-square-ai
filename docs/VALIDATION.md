@@ -1,4 +1,4 @@
-# Phase 1 实际验证记录
+# 实际验证记录：Phase 1 / 1.5 / 1.6
 
 日期：2026-10-07（Asia/Shanghai）。代码基线：`SMOService/buffer-poster-bot` main
 `acc720e9aae7748a029400202626eab26dc8c005`，已从下载 ZIP 的 commit comment 再次核对。
@@ -92,3 +92,34 @@
   中 Compose build/up/health 步骤成功，容器诊断与清理也成功。该结果独立于 Phase 1。
 - CI 显式 RUN_LIVE_TESTS=false、AUTO_PUBLISH=false、真实 Key 留空；新增测试继续用 mock。
 - 未连接 VPS、未部署生产环境，未调用 content/add、image/presignedUrl 或其他真实发布接口。
+
+## Phase 1.6 实际验证（2026-10-08，Asia/Shanghai）
+
+本轮起点为 main `a4b94cade1258758c0eb1e2be2f1e160ef702476`。在原有结构上增量增加 staging 诊断，
+保留全部 Phase 1/1.5 测试、官方发布库和禁发安全门；未实现 Futures、行情异动或 Announcement。
+
+| 检查 | 本轮实际结果 |
+| --- | --- |
+| 网络分类 / HTTP / 原诊断 | 21 passed：DNS、connect/read timeout、TLS、HTTP status、重试、脱敏与原 Provider 回归 |
+| SQLite / 报告 / 原 DB、后台回归 | 29 passed（早期模块轮次）：增量迁移、评分分母/分组/top10、滚动窗口、日预算、跨重启；随后补充原子回滚与采集先于 Writer 持久化 |
+| Readiness / CLI / 禁发 / 原后台回归 | 25 passed：Spot 关键、过期/未来/失败关闭，RSS 降级，管理员配置、数据库失败、CLI 保留写入 claim、后台环境误变 true 仍锁定 |
+| 全量 pytest | **90 passed、7 live tests skipped**（11.30s）；全部旧测试保留 |
+| Ruff | `ruff check .`：All checks passed |
+| compileall | `python -m compileall -q src config.py db.py services/binance.py`：退出 0 |
+| Diff | `git diff --check`：通过 |
+| 真实本地进程 | 模拟 Docker COPY 布局，鉴权后台、/health、三项 CLI 报告、Preview、评分通过；输入 AUTO_PUBLISH=true，运行态仍 false |
+| 文档中的备份代码 | 使用实际 STAGING.md Python snippet，在源 DB 存在已提交 WAL 数据时生成快照；quick_check 和 WAL 记录核对通过 |
+| 本机 Docker | 实际尝试 build/up/ps，均因找不到 docker 命令而无法运行；本机没有 Docker CLI/Engine |
+
+最初异步测试因 Windows 沙盒阻止本机 asyncio socketpair 而卡住；获准网络权限后重新运行，
+默认测试仍拦截外部 HTTP。模块回归发现精简旧 v4 DB 缺 kv 表，已补充幂等建表并修复回归。
+这些是测试环境/迁移修复记录，不是 VPS 或真实 API 成功记录。
+
+本轮 CI 保持 RUN_LIVE_TESTS=false、AUTO_PUBLISH=false、真实 Gemini/Groq/Square Key 留空。
+容器步骤在原 build/up/health 上增加 readiness fail-closed 与质量/会话报告 smoke；管理员 token 为明确的 CI mock。
+本次远程容器结果必须按本轮提交的 [GitHub Actions](https://github.com/xingxinghuisi/binance-square-ai/actions)
+单独核验，历史 Phase 1.5 容器成功不替代本轮验证。
+
+未连接 VPS、未部署生产或 staging 服务器；本轮未发起真实 AI/公开源探测，也未开启 RUN_LIVE_TESTS。
+没有使用 Square Key、创建真实帖子或上传 Binance 媒体。普通测试中的既有发布协议验证仅使用 localhost mock。
+VPS 配置实际模型 Key 后按 [STAGING.md](STAGING.md) 执行真实 test-ai/test-sources，再进行样稿审阅。

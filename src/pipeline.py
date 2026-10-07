@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 import db
 from src.ai.provider import build_provider
@@ -30,6 +31,7 @@ class Pipeline:
                           if getattr(p, "name", None) == name) for name in ("gemini", "groq")}
 
     async def collect_once(self) -> dict:
+        started_at = int(time.time())
         before = self.request_counts()
         stats = {"news": 0, "market": 0, "new_events": 0, "drafts": 0, "failures": 0,
                  "rss": {}, "market_symbols": {s: "ERROR" for s in self.settings.market_symbols},
@@ -67,6 +69,8 @@ class Pipeline:
                 for row in rows:
                     stats["rss"].setdefault(row["source"], sum(r["source"] == row["source"] for r in rows))
         stats["new_events"] = stats["events"]["accepted"]
+        # Save collection outcomes before AI work, including rejected/duplicate observations.
+        self.store.record_collection(stats["events"], started_at=started_at)
         self.generation_errors = []
         stats["drafts"] = await self.generate_pending()
         stats["errors"].extend(self.generation_errors)

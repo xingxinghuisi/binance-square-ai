@@ -1,4 +1,4 @@
-name: Phase 1.5 CI
+name: Phase 1.6 CI
 on:
   push:
   pull_request:
@@ -29,10 +29,13 @@ jobs:
       - run: python -m pytest tests -q
       - name: Compose build and local health smoke (dry run, no collectors)
         run: |
-          printf 'COLLECT_ENABLED=false\n' > .env
+          printf 'COLLECT_ENABLED=false\nADMIN_TOKEN=ci-only-admin-token\nALLOW_UNAUTHENTICATED_ADMIN=false\n' > .env
           docker compose config --quiet
           docker compose up --build -d --wait --wait-timeout 120
           curl --fail http://127.0.0.1:8080/health
+          docker compose exec -T square-ai python -m src.cli quality-report --json
+          docker compose exec -T square-ai python -m src.cli session-report --json
+          docker compose exec -T square-ai python -c "import json,subprocess; p=subprocess.run(['python','-m','src.cli','readiness','--json'],capture_output=True,text=True); d=json.loads(p.stdout); assert p.returncode==1 and d['database'] and d['dry_run_lock'] and not d['ready'] and not d['auto_publish']; print('Staging readiness fails closed with no providers/source probes')"
       - name: Container diagnostics and cleanup
         if: always()
         run: |

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from collections import Counter
 from datetime import datetime, timezone
 
 import db
@@ -13,7 +14,8 @@ from src.logging_config import redact
 class Store:
     def reserve_ai_request(self, limit: int, provider: str | None = None):
         # Count every outbound model request, including HTTP retries and fallback.
-        key = "ai_requests:" + datetime.now(timezone.utc).date().isoformat()
+        now = int(time.time())
+        key = "ai_requests:" + datetime.fromtimestamp(now, timezone.utc).date().isoformat()
         with db.get_conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
@@ -26,6 +28,8 @@ class Store:
                 provider_key = key + ":" + provider
                 conn.execute("INSERT INTO kv(key,value) VALUES(?, '1') ON CONFLICT(key) "
                              "DO UPDATE SET value=CAST(value AS INTEGER)+1", (provider_key,))
+            conn.execute("INSERT INTO ai_request_log(created_at,provider) VALUES(?,?)",
+                         (now, provider if provider in {"gemini", "groq"} else "unknown"))
 
     def save_event(self, event_id: str, fingerprint: str, event: dict) -> bool:
         with db.get_conn() as conn:
@@ -169,3 +173,68 @@ class Store:
     def ai_request_counts(self) -> dict[str, int]:
         key = "ai_requests:" + datetime.now(timezone.utc).date().isoformat()
         return {name: int(db.kv_get(key + ":" + name, 0)) for name in ("gemini", "groq")}
+
+    def record_collection(self, outcomes: dict, *, started_at: int):
+        fields = ("received", "accepted", "rejected", "deduplicated")
+        values = [outcomes[field] for field in fields]
+        if any(type(value) is not int or value < 0 for value in values) or values[0] != sum(values[1:]):
+            raise ValueError("invalid collection counts")
+        with db.get_conn() as conn:
+            conn.execute("INSERT INTO collection_runs(started_at,completed_at,received,accepted,rejected,deduplicated) "
+                         "VALUES(?,?,?,?,?,?)", (started_at, int(time.time()), *values))
+
+    @staticmethod
+    def _quality_summary(rows) -> dict:
+        counts = Counter(row["quality_status"] for row in rows)
+        rated = counts["good"] + counts["bad"]
+        result = {"total": len(rows), **{status: counts[status] for status in ("pending", "good", "bad")},
+                  "good_rate": counts["good"] / rated if rated else None}
+        reasons = Counter(" ".join(row["quality_note"].split()) or "(no note)"
+                          for row in rows if row["quality_status"] == "bad")
+        result["bad_reasons"] = [{"reason": reason, "count": count}
+                                 for reason, count in sorted(reasons.items(), key=lambda pair: (-pair[1], pair[0]))[:10]]
+        groups = {field: {} for field in ("event_type", "source", "symbol", "ai_provider")}
+        for row in rows:
+            event = json.loads(row["payload"] or "null") or {}
+            metadata = {"event_type": event.get("type"), "source": event.get("source"),
+                        "symbol": event.get("symbol"), "ai_provider": row["ai_provider"]}
+            for field, value in metadata.items():
+                label = str(value) if value is not None else "unknown"
+                group = groups[field].setdefault(label, {"good": 0, "bad": 0})
+                if row["quality_status"] in group:
+                    group[row["quality_status"]] += 1
+        result["by"] = {field: dict(sorted(values.items())) for field, values in groups.items()}
+        return result
+
+    def quality_report(self) -> dict:
+        # Full unpublished draft history, including manual/review/failed drafts; no text needed.
+        with db.get_conn() as conn:
+            rows = conn.execute("SELECT q.quality_status,q.quality_note,q.ai_provider,e.payload "
+                                "FROM binance_queue q LEFT JOIN ai_events e ON e.id=q.event_id "
+                                "WHERE q.published=0").fetchall()
+        return self._quality_summary(rows)
+
+    def session_report(self, *, now: int | None = None) -> dict:
+        now = int(time.time()) if now is None else now
+        since = now - 86400
+        # A consistent snapshot across counters and drafts, spanning UTC midnight.
+        with db.get_conn() as conn:
+            conn.execute("BEGIN")
+            events = conn.execute("SELECT COALESCE(SUM(received),0) AS received, COALESCE(SUM(accepted),0) AS accepted, "
+                                  "COALESCE(SUM(rejected),0) AS rejected, COALESCE(SUM(deduplicated),0) AS deduplicated "
+                                  "FROM collection_runs WHERE completed_at BETWEEN ? AND ?", (since, now)).fetchone()
+            requests = {row["provider"]: row["total"] for row in conn.execute(
+                "SELECT provider,COUNT(*) AS total FROM ai_request_log WHERE created_at BETWEEN ? AND ? GROUP BY provider",
+                (since, now))}
+            rows = conn.execute("SELECT q.quality_status,q.quality_note,q.ai_provider,e.payload "
+                                "FROM binance_queue q LEFT JOIN ai_events e ON e.id=q.event_id "
+                                "WHERE q.event_id IS NOT NULL AND COALESCE(q.generated_at,q.created_at) BETWEEN ? AND ?",
+                                (since, now)).fetchall()
+            recorded = conn.execute("SELECT value FROM kv WHERE key='session_recording_since'").fetchone()
+        recording_since = int(recorded[0]) if recorded else now
+        return {"since": since, "until": now, "recording_since": recording_since,
+                "complete_window": recording_since <= since,
+                "events": dict(events),
+                "ai_requests": {"total": sum(requests.values()), **{name: requests.get(name, 0) for name in ("gemini", "groq", "unknown")}},
+                "drafts": {key: value for key, value in self._quality_summary(rows).items()
+                           if key in {"total", "good", "bad", "pending"}}}

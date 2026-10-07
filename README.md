@@ -1,4 +1,4 @@
-# Binance Square AI — Phase 1.5
+# Binance Square AI — Phase 1.6
 
 **English** | [简体中文](README.zh-CN.md)
 
@@ -10,6 +10,35 @@ No other legacy projects were integrated. The original MIT license and SMOServic
 **Drafts only by default: `AUTO_PUBLISH=false`. Docker Compose also forces this setting to false.**
 Phase 1 has not been deployed to production or tested with real provider credentials or real Binance Square posts.
 The documentation is bilingual; the AI writer and review dashboard currently produce Chinese content.
+
+## Phase 1.6 VPS staging preparation
+
+Follow the [staging guide](docs/STAGING.en.md) ([Chinese](docs/STAGING.md)) for checkout, secrets,
+authenticated startup, real probes, draft review, logs, updates and consistent SQLite backup.
+Staging uses real models/public data to prepare drafts; Square credentials are ignored/not required.
+All CLI/backend entry points force dry run, Compose forces false and the backend scheduler remains locked.
+Runtime environment changes also cannot make health/dashboard display publishing as enabled.
+
+```bash
+python -m src.cli readiness
+python -m src.cli quality-report
+python -m src.cli session-report
+# All three support --json and never make network requests.
+```
+
+Readiness requires a healthy DB, dry-run lock, at least one configured provider, ADMIN_TOKEN,
+and successful nonempty latest Binance Spot data within READINESS_MAX_AGE_SEC (default 3600).
+Spot is critical: unknown/failed/stale observations give ready=false (exit 1); RSS is noncritical,
+so CoinDesk failure alone does not block drafting. Configuration is not credential verification: run test-ai.
+Network diagnostics distinguish DNS, connect/read timeouts, TLS, HTTP status and total timeout without raw errors.
+
+Quality reports cover all unpublished drafts, showing pending/good/bad, good/(good+bad), top 10 normalized bad notes,
+and good/bad grouped by event_type/source/symbol/ai_provider. Unrated good_rate is null/N/A.
+Session reports use a rolling 24-hour UTC window and persist collection outcomes and per-model HTTP attempts,
+including retry, fallback and test-ai. AI-generated drafts show current ratings; manual drafts are excluded.
+SQLite v7 -> v8 adds telemetry without replacing queue/ratings/budgets. Historical counters cannot be reconstructed;
+the first 24 hours explicitly show partial coverage. CLI checks retain active writer claims; startup recovery remains.
+Back up before upgrading. RUN_LIVE_TESTS stays false in default CI and no real keys are injected.
 
 ## Phase 1.5 diagnostics and review
 
@@ -123,7 +152,7 @@ src/
   app.py                    Read-only dashboard, APIs, health and background workers
   cli.py                    Local text/image draft enqueue and one-shot collection
   http.py / settings.py     Shared timeout/retry policy and configuration
-db.py                       Existing database, incrementally migrated to schema v7
+db.py                       Existing database, incrementally migrated to schema v8
 services/binance.py          Preserved official v1/v2 publishing flow
 prompts/writer.txt           Editable writing prompt
 ```
@@ -140,7 +169,7 @@ flowchart LR
     Q --> S[Scheduler / Retry]
     S --> Gate{AUTO_PUBLISH}
     Gate -->|false by default| Hold[Retain draft; do not call Binance]
-    Pub[Official Binance Square client retained; inactive in Phase 1.5]
+    Pub[Official Binance Square client retained; inactive in staging]
 ```
 
 News collectors return `{id, source, title, summary, url, published_at, symbols}`.
@@ -191,7 +220,7 @@ Requires Docker Engine and Docker Compose v2.24+ for optional `env_file` support
 
 ```bash
 cp .env.example .env
-# Edit .env; API keys may remain empty for an initial review.
+# Configure ADMIN_TOKEN; provider keys may remain empty for an initial review.
 docker compose config --quiet
 docker compose up --build -d
 docker compose ps
@@ -208,7 +237,8 @@ Before future access through a domain, configure a random `ADMIN_TOKEN`, retain 
 Browser Basic Auth uses username `admin` and the token as its password. APIs also accept `Authorization: Bearer ...`.
 Tokens are not accepted in URL query parameters, and dashboard content is HTML-escaped.
 A standalone bind to a non-loopback address requires `ADMIN_TOKEN`, unless `ALLOW_UNAUTHENTICATED_ADMIN=true` is explicitly set for an isolated local environment.
-Compose sets this option within its loopback-only host-port mapping.
+Compose uses true only as an absent-variable fallback for loopback review; it honors .env's explicit false.
+For staging, configure ADMIN_TOKEN and ALLOW_UNAUTHENTICATED_ADMIN=false as described in the guide.
 
 ## Read-only APIs and health
 

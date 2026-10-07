@@ -8,14 +8,14 @@ services:
       - path: .env
         required: false
     environment:
-      # Phase 1 locks Compose to dry-run, including if .env says true.
+      # Staging locks Compose to dry-run, including if .env says true.
       AUTO_PUBLISH: "false"
       HOST: "0.0.0.0"
       PORT: "8080"
       DATABASE_URL: "${DATABASE_URL:-sqlite:////app/data/bot.db}"
       MEDIA_ROOT: "/app/data/media"
       # Only for this loopback mapping. Configure ADMIN_TOKEN before remote access.
-      ALLOW_UNAUTHENTICATED_ADMIN: "true"
+      ALLOW_UNAUTHENTICATED_ADMIN: "${ALLOW_UNAUTHENTICATED_ADMIN:-true}"
     ports:
       - "127.0.0.1:${PORT:-8080}:8080"
     volumes:

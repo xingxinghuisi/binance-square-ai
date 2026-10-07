@@ -3,17 +3,37 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import socket
+import ssl
 from dataclasses import dataclass, field
 
 import aiohttp
 
 
 class HTTPFailure(RuntimeError):
-    def __init__(self, status: int | None = None, *, transport: bool = False):
+    def __init__(self, status: int | None = None, *, transport: bool = False, category: str | None = None):
         # Never include URL, response body, request headers, or raw exceptions.
         super().__init__(f"HTTP status {status}" if status else "external request failed")
         self.status = status
         self.transport = transport
+        self.category = category if category in {"dns", "connect_timeout", "read_timeout", "tls", "timeout", "connection"} else None
+
+
+def transport_category(exc: Exception) -> str:
+    # Classify by type only: raw messages can contain URLs, credentials or hostnames.
+    if isinstance(exc, (aiohttp.ClientSSLError, aiohttp.ServerFingerprintMismatch, ssl.SSLError)):
+        return "tls"
+    if isinstance(exc, aiohttp.ClientConnectorDNSError) or (
+        isinstance(exc, aiohttp.ClientConnectorError) and isinstance(exc.os_error, socket.gaierror)
+    ):
+        return "dns"
+    if isinstance(exc, aiohttp.ConnectionTimeoutError):
+        return "connect_timeout"
+    if isinstance(exc, aiohttp.SocketTimeoutError):
+        return "read_timeout"
+    if isinstance(exc, asyncio.TimeoutError):
+        return "timeout"
+    return "connection"
 
 
 class BudgetExceeded(RuntimeError):
@@ -46,7 +66,9 @@ class HTTPClient:
     async def request(self, method: str, url: str, *, retry: bool = True, return_errors: bool = False,
                       max_bytes: int = 5_000_000, before_attempt=None, **kwargs) -> Response:
         attempts = self.attempts if retry else 1
-        timeout = kwargs.pop("timeout", aiohttp.ClientTimeout(total=self.timeout))
+        timeout = kwargs.pop("timeout", aiohttp.ClientTimeout(
+            total=self.timeout, connect=min(10, self.timeout / 2),
+            sock_connect=min(10, self.timeout / 2), sock_read=self.timeout / 2))
         for attempt in range(attempts):
             if before_attempt is not None:
                 before_attempt()
@@ -72,9 +94,9 @@ class HTTPClient:
                         raise HTTPFailure(resp.status)
                     else:
                         return response
-            except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            except (aiohttp.ClientError, asyncio.TimeoutError, ssl.SSLError) as exc:
                 if attempt + 1 >= attempts:
-                    raise HTTPFailure(transport=True) from exc
+                    raise HTTPFailure(transport=True, category=transport_category(exc)) from None
             finally:
                 if owned:
                     await session.close()

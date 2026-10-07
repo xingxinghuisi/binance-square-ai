@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from config import BINANCE_MAX_ATTEMPTS, DB_PATH, HISTORY_LIMIT
 from src.logging_config import redact
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class _Connection(sqlite3.Connection):
@@ -34,7 +34,7 @@ def _set_user_version(conn, v: int):
     conn.execute(f"PRAGMA user_version = {int(v)}")
 
 
-def init_db():
+def init_db(*, recover_interrupted: bool = True):
     with get_conn() as conn:
         v = _user_version(conn)
         if v > SCHEMA_VERSION:
@@ -162,10 +162,28 @@ def init_db():
                 if name not in columns:
                     conn.execute(ddl)
             _set_user_version(conn, 7)
+        if v < 8:
+            # Additive staging telemetry; do not reconstruct missing historical counts.
+            conn.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT)")
+            conn.execute("""CREATE TABLE IF NOT EXISTS collection_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at INTEGER NOT NULL, completed_at INTEGER NOT NULL,
+                received INTEGER NOT NULL, accepted INTEGER NOT NULL,
+                rejected INTEGER NOT NULL, deduplicated INTEGER NOT NULL
+            )""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_collection_completed ON collection_runs(completed_at)")
+            conn.execute("""CREATE TABLE IF NOT EXISTS ai_request_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, created_at INTEGER NOT NULL,
+                provider TEXT NOT NULL
+            )""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_ai_request_created ON ai_request_log(created_at)")
+            conn.execute("INSERT OR IGNORE INTO kv(key,value) VALUES('session_recording_since',strftime('%s','now'))")
+            _set_user_version(conn, 8)
         # An interrupted content/add may have reached Binance. Do not resend blindly.
-        conn.execute("UPDATE binance_queue SET status='review', last_error='interrupted publish: verify remotely' "
-                     "WHERE status='publishing'")
-        conn.execute("UPDATE ai_events SET status='new' WHERE status='writing'")
+        if recover_interrupted:
+            conn.execute("UPDATE binance_queue SET status='review', last_error='interrupted publish: verify remotely' "
+                         "WHERE status='publishing'")
+            conn.execute("UPDATE ai_events SET status='new' WHERE status='writing'")
         conn.commit()
 
 
